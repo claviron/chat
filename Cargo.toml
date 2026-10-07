@@ -2,7 +2,11 @@
 name = "claviron-chat"
 version = "0.2.0-alpha.16"
 edition = "2024"
-publish = false
+authors = ["ilker Arabaci <iadeveloper@hotmail.com>"]
+# Pre-releases go to the de02 registry only, in step with claviron's version.
+publish = ["de02"]
+# The JavaScript client is built and shipped on its own.
+exclude = ["client/", ".idea/"]
 description = "Chat transports for a Claviron edge: WebSocket upgrade, HTTP/2 CONNECT, WebTransport, and a QUIC prototype."
 autotests = false
 
@@ -25,7 +29,7 @@ webtransport = [
 metrics = []
 
 [dependencies]
-claviron = { path = "../claviron", default-features = false, features = [
+claviron = { version = "0.2.0-alpha.16", registry = "de02", path = "../claviron", default-features = false, features = [
     "auth",
     "server",
     "edge",
