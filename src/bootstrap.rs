@@ -1,38 +1,24 @@
-use std::sync::Arc;
-
-use claviron::runtime::AppState;
+use claviron::runtime::{AppState, Register};
 
 use crate::ChatServer;
-use crate::config::{ChatConfigProvider, chat_config_path};
+use crate::config::ChatConfigProvider;
 #[cfg(feature = "quic")]
 use crate::svc::ChatQuicService;
 use crate::svc::ChatWebService;
 
-/// Register chat providers.
+/// Register chat, in every process.
 ///
-/// Per the `Provider` lifecycle convention: `register()` is pure type
-/// insertion — no config reads, no environment checks, no registry
-/// resolves. `ChatConfigProvider` owns `chat.yaml` (loaded at its own
-/// `boot()`, priority EARLY). The runtime providers (`ChatServer`,
-/// `ChatWebService`, `ChatQuicService`) resolve `ChatConfigProvider`
-/// in their boot to read the snapshot — none of them touch the
-/// filesystem directly. `Runnable::run()` honours `enabled` before
-/// spawning long-lived loops.
+/// `ChatConfigProvider` owns `chat.yaml` through Congif; the runtimes
+/// (`ChatServer`, `ChatWebService`, `ChatQuicService`) are handed it at
+/// registration and read its snapshot — none of them touch the filesystem.
+/// What runs where is declared through `Scoped`: the fanout and the QUIC
+/// listener run in workers, and every runnable honours `enabled` before it
+/// does anything.
 pub fn register(state: &AppState) -> claviron::runtime::registry::Result<()> {
-    let registry = state.registry_ref();
-    let cfg_path = chat_config_path(state);
-
-    registry.insert(Arc::new(ChatConfigProvider::empty(cfg_path)))?;
-    registry.insert(Arc::new(ChatServer::empty()))?;
-    claviron::edge::register_routable(
-        state,
-        Arc::new(ChatWebService::empty(state.clone())),
-    )?;
-
+    ChatConfigProvider::register(state)?;
+    ChatServer::register(state)?;
+    ChatWebService::register(state)?;
     #[cfg(feature = "quic")]
-    if !state.is_master() {
-        registry.insert(Arc::new(ChatQuicService::empty(state.clone())))?;
-    }
-
+    ChatQuicService::register(state)?;
     Ok(())
 }

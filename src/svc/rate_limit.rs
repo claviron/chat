@@ -98,7 +98,7 @@ impl ChatRateLimiter {
     }
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, PartialEq, Deserialize)]
 pub struct ChatRateLimitConfig {
     /// Time window for rate limiting (e.g., "1m", "30s")
     #[serde(deserialize_with = "deserialize_duration")]

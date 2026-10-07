@@ -1,5 +1,5 @@
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -9,8 +9,11 @@ use claviron::edge::Host;
 use claviron::helpers::de::{
     deserialize_bind_address, deserialize_duration, one_or_many,
 };
-use claviron::runtime::AppState;
+use claviron::runtime::congif::{
+    self, ConfigFile, ConfigObserver, Configurable,
+};
 use claviron::runtime::registry::{Provider, Reloadable, priority};
+use claviron::runtime::{AppState, Register};
 use claviron::tls::auth::verifier::PolicyConfig;
 use serde::Deserialize;
 use tracing::info;
@@ -20,19 +23,25 @@ use crate::svc::rate_limit::ChatRateLimitConfig;
 mod quic;
 use quic::ChatQuicConfig;
 
-/// Single owner of `chat.yaml`. Loads at boot, hot-reloads, and exposes
-/// a typed snapshot via `current()`. Mirrors the
-/// `claviron::http::HttpConfigProvider` pattern: every chat runtime
-/// (`ChatServer`, `ChatWebService`, `ChatQuicService`) resolves THIS
-/// from the registry in its own `boot()` and pulls what it needs —
-/// nobody else does file I/O. Reload is centralized here so all chat
-/// runtimes see the same atomic swap.
+/// What the chat configuration file is called in the config directory.
+pub const CONFIG_FILE: &str = "chat.yaml";
+
+/// Single owner of `chat.yaml`, read by Congif: prepared before boot and in
+/// the reload batch, applied here through `configure`, and followed through
+/// `ConfigObserver` when the source is watched. Every chat runtime
+/// (`ChatServer`, `ChatWebService`, `ChatQuicService`) is handed this at
+/// registration and reads the snapshot via `current()` — nobody else does
+/// file I/O, and all of them see the same atomic swap.
 pub struct ChatConfigProvider {
     config_path: PathBuf,
     snapshot: ArcSwap<ChatConfig>,
 }
 
 impl ChatConfigProvider {
+    pub fn new(state: &AppState) -> Self {
+        Self::empty(state.config_dir().join(CONFIG_FILE))
+    }
+
     pub fn empty(config_path: PathBuf) -> Self {
         Self {
             config_path,
@@ -40,18 +49,25 @@ impl ChatConfigProvider {
         }
     }
 
-    /// Current chat config snapshot. Always returns — the boot path
-    /// loads `chat.yaml` (or seeds defaults if missing) before any
-    /// consumer's `boot()` runs.
+    /// Current chat config snapshot. Always returns — Congif applies
+    /// `chat.yaml` (or the defaults, without the file) before any boot.
     pub fn current(&self) -> Arc<ChatConfig> {
         self.snapshot.load_full()
     }
 
-    async fn rebuild(&self) -> claviron::runtime::registry::Result<()> {
-        let cfg = ChatConfig::load(&self.config_path).await.map_err(|e| {
-            claviron::runtime::registry::Error::msg(e.to_string())
-        })?;
-        self.snapshot.store(Arc::new(cfg));
+    fn apply(
+        &self,
+        config: &ChatConfig,
+    ) {
+        self.snapshot.store(Arc::new(config.clone()));
+        info!("📦 ChatConfigProvider applied {}", self.config_path.display());
+    }
+}
+
+impl Register<AppState> for ChatConfigProvider {
+    fn register(state: &AppState) -> claviron::runtime::registry::Result<()> {
+        state.bind_config_environment::<Self>()?;
+        state.registry_ref().insert(Arc::new(Self::new(state)))?;
         Ok(())
     }
 }
@@ -62,21 +78,58 @@ impl Provider<AppState> for ChatConfigProvider {
         "ChatConfigProvider"
     }
 
-    fn boot_priority(&self) -> Option<u8> {
-        Some(priority::EARLY)
-    }
-
-    async fn boot(
-        &self,
-        _state: &AppState,
-    ) -> claviron::runtime::registry::Result<()> {
-        self.rebuild().await?;
-        info!("📦 ChatConfigProvider loaded {}", self.config_path.display());
-        Ok(())
+    fn as_configurable(&self) -> Option<&dyn congif::ConfigRegistration> {
+        Some(self)
     }
 
     fn as_reloadable(&self) -> Option<&dyn Reloadable<AppState>> {
         Some(self)
+    }
+}
+
+#[async_trait]
+impl Configurable for ChatConfigProvider {
+    type Config = ChatConfig;
+
+    fn source(&self) -> ConfigFile {
+        ConfigFile::yaml(&self.config_path)
+    }
+
+    /// Without the file chat is off; `enabled: true` is how it is opted in.
+    fn absent_source(&self) -> Option<ChatConfig> {
+        Some(ChatConfig::default())
+    }
+
+    fn validate_config(
+        &self,
+        config: &ChatConfig,
+    ) -> congif::Result<()> {
+        config.validate().map_err(congif::Error::invalid)
+    }
+
+    async fn configure(
+        &self,
+        config: &ChatConfig,
+    ) -> congif::Result<()> {
+        self.apply(config);
+        Ok(())
+    }
+
+    fn as_config_observer(
+        &self
+    ) -> Option<&dyn ConfigObserver<Config = Self::Config>> {
+        Some(self)
+    }
+}
+
+#[async_trait]
+impl ConfigObserver for ChatConfigProvider {
+    async fn config_changed(
+        &self,
+        config: &ChatConfig,
+    ) -> congif::Result<()> {
+        self.apply(config);
+        Ok(())
     }
 }
 
@@ -88,20 +141,16 @@ impl Reloadable<AppState> for ChatConfigProvider {
 
     async fn reload(
         &self,
-        _state: &AppState,
+        state: &AppState,
     ) -> claviron::runtime::registry::Result<()> {
-        self.rebuild().await?;
-        info!("🔁 ChatConfigProvider reloaded {}", self.config_path.display());
+        let config = state.config_reader().snapshot::<Self>()?;
+        self.apply(&config);
         Ok(())
     }
 }
 
-/// Standard config path: `<state.config_dir()>/chat.yaml`.
-pub fn chat_config_path(state: &AppState) -> PathBuf {
-    state.config_dir().join("chat.yaml")
-}
 /// Chat service configuration
-#[derive(Clone, Deserialize)]
+#[derive(Clone, PartialEq, Deserialize)]
 pub struct ChatConfig {
     /// Enable chat runtime support (default: false).
     #[serde(default)]
@@ -241,39 +290,6 @@ impl ChatConfig {
         join_route_path(&self.path, &self.web_transport_path)
     }
 
-    /// Load chat config from `path`. Missing file → `Self::default()`
-    /// (chat is opt-in via `enabled: true`, so absence is a valid no-op
-    /// state and never an error). Async — used from `Provider::boot()`
-    /// and `Reloadable::reload()`; never called from sync `register()`.
-    pub async fn load(path: &Path) -> Result<Self, crate::error::Error> {
-        let config = match tokio::fs::read_to_string(path).await {
-            Ok(content) => {
-                serde_yaml::from_str::<Self>(&content).map_err(|e| {
-                    crate::error::Error::msg(format!(
-                        "invalid chat config {}: {e}",
-                        path.display()
-                    ))
-                })?
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                Self::default()
-            }
-            Err(e) => {
-                return Err(crate::error::Error::msg(format!(
-                    "failed to read chat config {}: {e}",
-                    path.display()
-                )));
-            }
-        };
-        config.validate().map_err(|message| {
-            crate::error::Error::msg(format!(
-                "invalid chat config {}: {message}",
-                path.display()
-            ))
-        })?;
-        Ok(config)
-    }
-
     fn validate(&self) -> Result<(), &'static str> {
         if let Some(quic) = &self.quic {
             quic.validate()?;
@@ -378,7 +394,7 @@ fn default_acquire_timeout() -> Duration {
 }
 
 /// Orbit-backed worker presence refresh policy.
-#[derive(Clone, Deserialize)]
+#[derive(Clone, PartialEq, Deserialize)]
 pub struct ChatPresenceConfig {
     /// How often a worker republishes its current user and room counters.
     #[serde(
@@ -412,7 +428,7 @@ fn default_presence_stale_after() -> Duration {
     Duration::from_secs(15)
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, PartialEq, Deserialize)]
 pub struct ChatAuthConfig {
     /// Auth guards accepted by chat transports. An empty list preserves
     /// the legacy single-guard behavior and enables only `default_guard`.
@@ -473,7 +489,7 @@ pub enum ChatAuthGuard {
     Ticket,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, PartialEq, Deserialize)]
 pub struct OrbitChatAuthConfig {
     /// Orbit token audience used by chat. Kept configurable so host apps can
     /// move away from starter defaults without code changes.
@@ -505,7 +521,7 @@ fn default_orbit_audience() -> String {
     "urn:chat:svc".to_string()
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, PartialEq, Deserialize)]
 pub struct TicketChatAuthConfig {
     /// Cache store used for chat auth tickets. In production this is
     /// typically a Redis-backed `chat` store shared with the host app.
@@ -570,7 +586,7 @@ fn default_true() -> bool {
 }
 
 /// Configuration for periodical metrics collection/export.
-#[derive(Clone, Deserialize)]
+#[derive(Clone, PartialEq, Deserialize)]
 pub struct MetricsConfig {
     /// Period between metrics collections/exports
     #[serde(

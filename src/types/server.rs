@@ -7,11 +7,12 @@ use claviron::auth::UserProvider;
 use claviron::auth::orbit::TokenAuthenticator;
 use claviron::db::DbService;
 use claviron::orbit::FleetEventRegistry;
-use claviron::runtime::AppState;
+use claviron::orbit::placement::{Scope, Scoped};
 use claviron::runtime::events::ProcessEventBus;
 use claviron::runtime::registry::{
-    Error as RegistryError, Provider, Reloadable,
+    Error as RegistryError, Provider, Reloadable, Runnable,
 };
+use claviron::runtime::{AppState, Register, RunContext};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tokio::sync::{RwLock, broadcast};
@@ -39,13 +40,14 @@ use crate::{AvatarUrlProvider, ChatClient};
 
 /// Global svc server state.
 ///
-/// Lifecycle: `register()` (in `bootstrap.rs`) constructs an `empty()`
-/// instance — only intrusive in-memory state (clients, rooms, default
-/// rate limiter) is set. `Provider::boot()` resolves
-/// `ChatConfigProvider` for the live config snapshot, derives the
-/// real rate limiter, and (if the run-mode gate passes) resolves
-/// `DbService` to fill the OnceLock pool/store slots. Config file I/O
-/// lives entirely in `ChatConfigProvider` — this struct never reads
+/// Lifecycle: `Register` constructs an `empty()` instance with its
+/// `ChatConfigProvider` and the process event bus in hand — only in-memory
+/// state (clients, rooms) besides. `Provider::boot()` derives the rate
+/// limiter from the applied configuration and, when chat is enabled, takes
+/// the identity, auth and database handles from the registry; nothing is
+/// opened or spawned there. `Runnable::run`, scoped to workers, starts the
+/// fanout and presence listeners and holds them until shutdown. Config file
+/// I/O lives entirely in `ChatConfigProvider` — this struct never reads
 /// `chat.yaml` directly.
 #[derive(Clone)]
 pub struct ChatServer {
@@ -95,11 +97,9 @@ pub struct ChatServer {
 }
 
 impl ChatServer {
-    /// Empty constructor — pure type insertion, no I/O, no registry
-    /// resolves, no fake config seeding. Mirrors
-    /// `claviron_https::HttpsServer::empty`. `Provider::boot()` later
-    /// resolves `ChatConfigProvider` and `DbService` and fills the
-    /// OnceLock / ArcSwap slots.
+    /// Empty constructor — no I/O, no registry resolves, no fake config
+    /// seeding. `Register` hands it the config provider and the event bus;
+    /// `Provider::boot()` fills the identity and database slots.
     pub fn empty() -> Self {
         Self {
             clients: Arc::default(),
@@ -1918,31 +1918,40 @@ impl ChatServer {
     }
 }
 
+/// Registers the server, after `ChatConfigProvider`, with that provider
+/// and the process event bus in hand.
+impl Register<AppState> for ChatServer {
+    fn register(state: &AppState) -> claviron::runtime::registry::Result<()> {
+        let cfg_provider = state
+            .registry_ref()
+            .resolve::<ChatConfigProvider>()
+            .ok_or_else(|| {
+                RegistryError::msg(
+                    "ChatServer needs ChatConfigProvider: register it first",
+                )
+            })?;
+        let server = ChatServer::empty();
+        let _ = server.config_provider.set(cfg_provider);
+        let _ = server.events.set(state.events().bus().clone());
+        state.registry_ref().insert(Arc::new(server))?;
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl Provider<AppState> for ChatServer {
     fn name(&self) -> &'static str {
         "ChatServer"
     }
 
-    /// Resolve `ChatConfigProvider` (loaded by its own `boot()` at
-    /// `priority::EARLY`), derive the rate limiter, and — if chat is
-    /// enabled — resolve `DbService` to populate the pool/store
-    /// OnceLocks. No file I/O lives here.
+    /// Derive the rate limiter from the applied configuration and — if chat
+    /// is enabled — take the identity, auth and database handles from the
+    /// registry. No file I/O, nothing opened, nothing spawned.
     async fn boot(
         &self,
         state: &AppState,
     ) -> claviron::runtime::registry::Result<()> {
-        let cfg_provider = state
-            .registry_ref()
-            .resolve::<ChatConfigProvider>()
-            .ok_or_else(|| {
-                RegistryError::msg(
-                    "ChatServer boot: ChatConfigProvider not registered",
-                )
-            })?;
-        let cfg = cfg_provider.current();
-        let _ = self.config_provider.set(cfg_provider);
-        let _ = self.events.set(state.events().bus().clone());
+        let cfg = self.config_snapshot();
         let new_rate_limiter = ChatRateLimiter::new(
             cfg.rate_limit.window,
             cfg.rate_limit.max_messages,
@@ -1986,8 +1995,6 @@ impl Provider<AppState> for ChatServer {
         let _ = self.db_pool.set(pool.clone());
         let _ = self.message_store.set(MessageStore::new(pool.clone()));
         let _ = self.receipt_store.set(ReceiptStore::new(pool));
-        self.start_delivery_listener(state.clone());
-        self.start_presence_listener(state.clone());
 
         if let Some(registry) =
             state.registry_ref().resolve::<FleetEventRegistry>()
@@ -1999,7 +2006,6 @@ impl Provider<AppState> for ChatServer {
                 "ChatServer booted without FleetEventRegistry; chat fanout and presence are worker-local"
             );
         }
-        self.start_presence_refresh(state.clone());
 
         info!("📦 ChatServer booted");
         Ok(())
@@ -2007,6 +2013,43 @@ impl Provider<AppState> for ChatServer {
 
     fn as_reloadable(&self) -> Option<&dyn Reloadable<AppState>> {
         Some(self)
+    }
+
+    fn as_runnable(self: Arc<Self>) -> Option<Arc<dyn Runnable<AppState>>> {
+        Some(self)
+    }
+
+    fn as_scoped(&self) -> Option<&dyn Scoped> {
+        Some(self)
+    }
+}
+
+/// Fanout and presence belong where connections are: workers, or a
+/// standalone process. The master holds no clients.
+impl Scoped for ChatServer {
+    fn scope(&self) -> Scope {
+        Scope::Worker
+    }
+}
+
+/// The owned work: the delivery and presence listeners and the presence
+/// refresh, started when the process runs and ended with it. `enabled: false`
+/// runs nothing.
+#[async_trait]
+impl Runnable<AppState> for ChatServer {
+    async fn run(
+        self: Arc<Self>,
+        state: AppState,
+        context: RunContext,
+    ) -> claviron::runtime::registry::Result<()> {
+        if !self.config_snapshot().enabled {
+            return Ok(());
+        }
+        self.start_delivery_listener(state.clone());
+        self.start_presence_listener(state.clone());
+        self.start_presence_refresh(state);
+        context.cancelled().await;
+        Ok(())
     }
 }
 

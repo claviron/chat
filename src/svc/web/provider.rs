@@ -6,8 +6,8 @@ use claviron::edge::WebTransportRegistry;
 use claviron::edge::{
     H1UpgradeRoute, H2ConnectRegistry, Host, HostConfig, Routable,
 };
-use claviron::runtime::AppState;
 use claviron::runtime::registry::{Error as RegistryError, Provider};
+use claviron::runtime::{AppState, Register};
 use tracing::warn;
 
 use crate::config::ChatConfigProvider;
@@ -18,10 +18,11 @@ use crate::svc::web::web_transport::ChatWebTransportHandler;
 
 /// Web (HTTP/1.1 + HTTP/2) chat service.
 ///
-/// `register()` (in `bootstrap.rs`) constructs an `empty()` instance.
-/// `Provider::boot()` resolves `ChatConfigProvider` and caches the
-/// reference. WebSocket traffic is contributed as a host-scoped H1 upgrade
-/// binding, so the normal vhost router owns the HTTP/1 upgrade boundary.
+/// Registered with its `ChatConfigProvider` in hand; `boot` contributes the
+/// H2 CONNECT and WebTransport handlers to the edge registries for the hosts
+/// the applied configuration names, before the host routers are compiled.
+/// WebSocket traffic is contributed as a host-scoped H1 upgrade binding, so
+/// the normal vhost router owns the HTTP/1 upgrade boundary.
 pub struct ChatWebService {
     config_provider: OnceLock<Arc<ChatConfigProvider>>,
 }
@@ -29,6 +30,32 @@ pub struct ChatWebService {
 impl ChatWebService {
     pub fn empty(_state: AppState) -> Self {
         Self { config_provider: OnceLock::new() }
+    }
+
+    fn config_provider(
+        &self
+    ) -> claviron::runtime::registry::Result<&Arc<ChatConfigProvider>> {
+        self.config_provider.get().ok_or_else(|| {
+            RegistryError::msg("ChatWebService: ChatConfigProvider not loaded")
+        })
+    }
+}
+
+/// Registers the service as a routable contribution, after
+/// `ChatConfigProvider`.
+impl Register<AppState> for ChatWebService {
+    fn register(state: &AppState) -> claviron::runtime::registry::Result<()> {
+        let cfg_provider = state
+            .registry_ref()
+            .resolve::<ChatConfigProvider>()
+            .ok_or_else(|| {
+                RegistryError::msg(
+                    "ChatWebService needs ChatConfigProvider: register it first",
+                )
+            })?;
+        let service = ChatWebService::empty(state.clone());
+        let _ = service.config_provider.set(cfg_provider);
+        claviron::edge::register_routable(state, Arc::new(service))
     }
 }
 
@@ -38,18 +65,13 @@ impl Provider<AppState> for ChatWebService {
         "ChatWebService"
     }
 
+    /// Contributes handlers to the edge registries from the applied
+    /// configuration; nothing is bound or opened here.
     async fn boot(
         &self,
         state: &AppState,
     ) -> claviron::runtime::registry::Result<()> {
-        let cfg_provider = state
-            .registry_ref()
-            .resolve::<ChatConfigProvider>()
-            .ok_or_else(|| {
-                RegistryError::msg(
-                    "ChatWebService boot: ChatConfigProvider not registered",
-                )
-            })?;
+        let cfg_provider = self.config_provider()?.clone();
         let cfg = cfg_provider.current();
         if cfg.enabled
             && let Some(registry) =
@@ -90,7 +112,6 @@ impl Provider<AppState> for ChatWebService {
                 }
             }
         }
-        let _ = self.config_provider.set(cfg_provider);
         Ok(())
     }
 
@@ -124,15 +145,7 @@ impl Routable for ChatWebService {
         _key: &Host,
         _host: Arc<HostConfig>,
     ) -> claviron::runtime::registry::Result<Vec<H1UpgradeRoute>> {
-        let cfg_provider = self
-            .config_provider
-            .get()
-            .ok_or_else(|| {
-                RegistryError::msg(
-                    "ChatWebService: ChatConfigProvider not loaded",
-                )
-            })?
-            .clone();
+        let cfg_provider = self.config_provider()?.clone();
         let cfg = cfg_provider.current();
         let path = cfg.websocket_route_path();
         Ok(vec![H1UpgradeRoute::handler(

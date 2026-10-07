@@ -9,7 +9,7 @@ use claviron::helpers::de::{
 use claviron::http::config::QuicConfig;
 use serde::Deserialize;
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ChatQuicConfig {
     #[serde(default)]

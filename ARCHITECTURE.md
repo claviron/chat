@@ -13,7 +13,9 @@ rest of Claviron should continue to boot and serve normal traffic.
 
 ## Crate Boundary
 
-`chat` is a portable app-layer crate in `claviron-extra`. Its message,
+`claviron-chat` is its own crate, a service an edge binary takes as a direct
+dependency beside the `claviron` facade and registers with
+`claviron_chat::register`; it consumes the facade only. Its message,
 receipt, and runtime storage use SQLx directly and own only `chat.*` tables.
 It does not query an application's users, avatars, roles, or permissions.
 
@@ -322,3 +324,21 @@ from the shared TLS resolver. If none of the configured `hosts` exist in
 the shared resolver, TLS returns an error such as “No hostname found in
 shared host”. For chat, that is a recoverable configuration problem, not
 a process-fatal condition.
+
+## Lifecycle
+
+`ChatConfigProvider` is the Congif owner of `chat.yaml`: the file is prepared
+before boot and in the reload batch, applied in `configure`, followed through
+`ConfigObserver` when the source is watched, and absent means chat is off.
+Every provider is registered in every process through `Register<AppState>`;
+`ChatServer`, `ChatWebService` and `ChatQuicService` are handed the config
+provider at registration and read its snapshot, never the file.
+
+Boot holds no I/O: `ChatServer::boot` derives the rate limiter and takes the
+identity, auth and database handles; `ChatWebService::boot` contributes the
+H2 CONNECT and WebTransport handlers to the edge registries for the configured
+hosts, before host routers are compiled. The owned work — the delivery and
+presence listeners, the presence refresh, the QUIC listener — lives in
+`Runnable::run`, and `Scoped` places it in workers (or a standalone process);
+the master registers everything and runs none of it. `enabled: false` makes
+every runnable return at once.

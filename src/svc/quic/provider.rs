@@ -1,12 +1,16 @@
 use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
+use claviron::orbit::placement::{Scope, Scoped};
 use claviron::runtime::registry::{Error as RegistryError, Provider, Runnable};
-use claviron::runtime::{AppState, RunContext};
+use claviron::runtime::{AppState, Register, RunContext};
 
 use crate::config::ChatConfigProvider;
 use crate::svc::quic::server::start_quic_service;
 
+/// The raw QUIC prototype listener. Registered in every process with its
+/// `ChatConfigProvider` in hand; `Scoped` keeps it running in workers (or a
+/// standalone process), and `run` honours `enabled` before binding.
 pub struct ChatQuicService {
     state: AppState,
     config_provider: OnceLock<Arc<ChatConfigProvider>>,
@@ -20,7 +24,24 @@ impl ChatQuicService {
     fn config_provider(&self) -> &ChatConfigProvider {
         self.config_provider
             .get()
-            .expect("ChatQuicService::config_provider() called before Provider::boot() ran")
+            .expect("ChatQuicService is registered with its ChatConfigProvider")
+    }
+}
+
+impl Register<AppState> for ChatQuicService {
+    fn register(state: &AppState) -> claviron::runtime::registry::Result<()> {
+        let cfg_provider = state
+            .registry_ref()
+            .resolve::<ChatConfigProvider>()
+            .ok_or_else(|| {
+                RegistryError::msg(
+                    "ChatQuicService needs ChatConfigProvider: register it first",
+                )
+            })?;
+        let service = ChatQuicService::empty(state.clone());
+        let _ = service.config_provider.set(cfg_provider);
+        state.registry_ref().insert(Arc::new(service))?;
+        Ok(())
     }
 }
 
@@ -30,29 +51,23 @@ impl Provider<AppState> for ChatQuicService {
         "ChatQuicService"
     }
 
-    async fn boot(
-        &self,
-        state: &AppState,
-    ) -> claviron::runtime::registry::Result<()> {
-        let cfg_provider = state
-            .registry_ref()
-            .resolve::<ChatConfigProvider>()
-            .ok_or_else(|| {
-                RegistryError::msg(
-                    "ChatQuicService boot: ChatConfigProvider not registered",
-                )
-            })?;
-        let _ = self.config_provider.set(cfg_provider);
-        Ok(())
-    }
-
-    // No `as_reloadable` — same rationale as ChatWebService: config
-    // reload is owned by `ChatConfigProvider`.
+    // No `as_reloadable` — config reload is owned by `ChatConfigProvider`,
+    // and the listener reads the live snapshot.
 
     fn as_runnable(
         self: Arc<Self>
     ) -> Option<std::sync::Arc<dyn Runnable<AppState>>> {
         Some(self)
+    }
+
+    fn as_scoped(&self) -> Option<&dyn Scoped> {
+        Some(self)
+    }
+}
+
+impl Scoped for ChatQuicService {
+    fn scope(&self) -> Scope {
+        Scope::Worker
     }
 }
 
