@@ -1,0 +1,16 @@
+{
+  "name": "@claviron/chat-client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "build:min": "CLAVIRON_CHAT_MINIFY=1 node scripts/build.mjs"
+  },
+  "dependencies": {
+    "@msgpack/msgpack": "^3.1.2"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.5"
+  }
+}
