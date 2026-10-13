@@ -112,11 +112,12 @@ during boot; it does not bind a separate socket. Defaults come from
 serde default functions and are documented in `config/chat.yaml`
 (`/chat/ws`, `/chat/h2`, and `/chat/wt` by default).
 
-`config/chat.yaml` uses `hosts` (or singular `host`) with `Vec<Host>`
+`config/chat.yaml` uses `vhosts` (or singular `vhost`) with `Vec<Host>`
 semantics, matching `config/grpc.yaml`. These entries are resolved vhost
 keys, not raw public aliases. Public aliases belong in
 `config/sites/*.yaml`; chat binds to the canonical host key produced by
-the vhost resolver.
+the vhost resolver. `host`/`hosts` are not aliases for this selector, and web
+bindings compare only canonical keys when the edge snapshot is prepared.
 
 `ChatQuicService` remains a `Provider + Runnable` wrapper for the raw
 QUIC demo/prototype transport. It is not registered on master. In
@@ -320,7 +321,9 @@ transport adapters enter through normal vhost routing and never own
 global chat state.
 
 The raw QUIC transport still derives a per-chat certificate resolver
-from the shared TLS resolver. If none of the configured `hosts` exist in
+from the shared TLS resolver. `quic.hosts` (or singular `quic.host`) contains
+the actual TLS hostnames independently of `vhosts`; a symbolic key must not be
+used as an implicit SNI name. If none of the configured `quic.hosts` exist in
 the shared resolver, TLS returns an error such as “No hostname found in
 shared host”. For chat, that is a recoverable configuration problem, not
 a process-fatal condition.

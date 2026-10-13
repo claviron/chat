@@ -3,8 +3,9 @@
 use std::num::NonZeroUsize;
 use std::time::Duration;
 
+use claviron::edge::Host;
 use claviron::helpers::de::{
-    deserialize_duration, deserialize_optional_duration,
+    deserialize_duration, deserialize_optional_duration, one_or_many,
 };
 use claviron::http::config::QuicConfig;
 use serde::Deserialize;
@@ -12,6 +13,9 @@ use serde::Deserialize;
 #[derive(Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ChatQuicConfig {
+    /// Actual TLS hostnames for raw QUIC, not edge vhost keys.
+    #[serde(deserialize_with = "one_or_many", alias = "host")]
+    pub hosts: Vec<Host>,
     #[serde(default)]
     pub max_connections: Option<NonZeroUsize>,
     #[serde(default, deserialize_with = "deserialize_optional_duration")]
@@ -36,6 +40,9 @@ fn default_handshake_timeout() -> Duration {
 
 impl ChatQuicConfig {
     pub fn validate(&self) -> Result<(), &'static str> {
+        if self.hosts.is_empty() {
+            return Err("quic.hosts requires concrete TLS hostnames");
+        }
         if self.acquire_timeout.is_zero() || self.handshake_timeout.is_zero() {
             return Err(
                 "quic admission and handshake timeouts must be positive",
@@ -68,7 +75,7 @@ mod tests {
 
     #[test]
     fn separates_listener_limits_from_quic_and_preserves_indefinite_grace() {
-        let config: ChatQuicConfig = serde_yaml::from_str("max_connections: 10\ngraceful_timeout: null\nhandshake_timeout: 2s\ntransport: {keep_alive_interval: 10s, idle_timeout: 60s}").unwrap();
+        let config: ChatQuicConfig = serde_yaml::from_str("hosts: [chat.example.test]\nmax_connections: 10\ngraceful_timeout: null\nhandshake_timeout: 2s\ntransport: {keep_alive_interval: 10s, idle_timeout: 60s}").unwrap();
         assert_eq!(config.max_connections.unwrap().get(), 10);
         assert_eq!(config.handshake_timeout, Duration::from_secs(2));
         assert_eq!(config.graceful_timeout, None);
@@ -85,7 +92,10 @@ mod tests {
             "transport: {bogus: true}",
         ] {
             assert!(
-                serde_yaml::from_str::<ChatQuicConfig>(yaml).is_err(),
+                serde_yaml::from_str::<ChatQuicConfig>(&format!(
+                    "hosts: [chat.example.test]\n{yaml}"
+                ))
+                .is_err(),
                 "{yaml}"
             );
         }
@@ -95,10 +105,12 @@ mod tests {
             "transport: {keep_alive_interval: 10s, enable_early_data: true}",
         ] {
             assert!(
-                serde_yaml::from_str::<ChatQuicConfig>(yaml)
-                    .unwrap()
-                    .validate()
-                    .is_err()
+                serde_yaml::from_str::<ChatQuicConfig>(&format!(
+                    "hosts: [chat.example.test]\n{yaml}"
+                ))
+                .unwrap()
+                .validate()
+                .is_err()
             );
         }
     }

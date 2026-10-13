@@ -34,7 +34,7 @@ pub(crate) async fn start_quic_service(
     let tls_timeout = quic_cfg.handshake_timeout;
     let transport_cfg = &quic_cfg.transport;
 
-    let chat_resolver = derive_chat_resolver(&state, cfg.hosts())?;
+    let chat_resolver = derive_chat_resolver(&state, &quic_cfg.hosts)?;
 
     let cert_names = chat_resolver.hostnames();
 

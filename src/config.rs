@@ -185,8 +185,8 @@ pub struct ChatConfig {
     pub auth: ChatAuthConfig,
 
     /// Resolved vhost keys that should receive chat bindings.
-    #[serde(default, deserialize_with = "one_or_many", alias = "host")]
-    hosts: Vec<Host>,
+    #[serde(default, deserialize_with = "one_or_many", alias = "vhost")]
+    vhosts: Vec<Host>,
 
     #[serde(default)]
     /// Certificate verifier for non-websocket clients
@@ -270,8 +270,8 @@ impl ChatConfig {
         self.ca_path.as_deref()
     }
 
-    pub fn hosts(&self) -> &[Host] {
-        self.hosts.as_slice()
+    pub fn vhosts(&self) -> &[Host] {
+        self.vhosts.as_slice()
     }
 
     pub(crate) fn metrics_interval(&self) -> Option<Duration> {
@@ -321,7 +321,7 @@ impl Default for ChatConfig {
             h2_connect_path: default_h2_connect_path(),
             web_transport_path: default_web_transport_path(),
             auth: ChatAuthConfig::default(),
-            hosts: Vec::new(),
+            vhosts: Vec::new(),
             ca_path: None,
             policy: None,
             quic: None,

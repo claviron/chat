@@ -19,7 +19,7 @@ use crate::svc::web::web_transport::ChatWebTransportHandler;
 /// Web (HTTP/1.1 + HTTP/2) chat service.
 ///
 /// Registered with its `ChatConfigProvider` in hand; `boot` contributes the
-/// H2 CONNECT and WebTransport handlers to the edge registries for the hosts
+/// H2 CONNECT and WebTransport handlers to the edge registries for the vhost keys
 /// the applied configuration names, before the host routers are compiled.
 /// WebSocket traffic is contributed as a host-scoped H1 upgrade binding, so
 /// the normal vhost router owns the HTTP/1 upgrade boundary.
@@ -78,14 +78,14 @@ impl Provider<AppState> for ChatWebService {
                 state.registry_ref().resolve::<H2ConnectRegistry>()
         {
             let path = cfg.h2_connect_route_path();
-            for host in cfg.hosts() {
+            for host in cfg.vhosts() {
                 if let Err(err) = registry.register_handler_for_host(
                     &host.to_string(),
                     path.clone(),
                     Arc::new(ChatH2ConnectHandler::new(cfg_provider.clone())),
                 ) {
                     warn!(
-                        "failed to register chat H2 CONNECT binding for host {} at {}: {}",
+                        "failed to register chat H2 CONNECT binding for vhost {} at {}: {}",
                         host, path, err
                     );
                 }
@@ -97,7 +97,7 @@ impl Provider<AppState> for ChatWebService {
                 state.registry_ref().resolve::<WebTransportRegistry>()
         {
             let path = cfg.web_transport_route_path();
-            for host in cfg.hosts() {
+            for host in cfg.vhosts() {
                 if let Err(err) = registry.register_handler_for_host(
                     &host.to_string(),
                     path.clone(),
@@ -106,7 +106,7 @@ impl Provider<AppState> for ChatWebService {
                     )),
                 ) {
                     warn!(
-                        "failed to register chat WebTransport binding for host {} at {}: {}",
+                        "failed to register chat WebTransport binding for vhost {} at {}: {}",
                         host, path, err
                     );
                 }
@@ -124,7 +124,7 @@ impl Routable for ChatWebService {
     fn match_host(
         &self,
         key: &Host,
-        host: &HostConfig,
+        _host: &HostConfig,
     ) -> bool {
         let Some(cfg_provider) = self.config_provider.get() else {
             return false;
@@ -134,10 +134,7 @@ impl Routable for ChatWebService {
             return false;
         }
 
-        cfg.hosts().iter().any(|configured| {
-            configured == key
-                || host.aliases().iter().any(|alias| alias == configured)
-        })
+        cfg.vhosts().contains(key)
     }
 
     fn h1_upgrades(
