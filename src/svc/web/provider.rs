@@ -6,7 +6,9 @@ use claviron::edge::WebTransportRegistry;
 use claviron::edge::{
     H1UpgradeRoute, H2ConnectRegistry, Host, HostConfig, Routable,
 };
-use claviron::runtime::registry::{Error as RegistryError, Provider};
+use claviron::runtime::registry::{
+    Bootable, Component, Error as RegistryError,
+};
 use claviron::runtime::{AppState, Register};
 use tracing::warn;
 
@@ -60,59 +62,22 @@ impl Register<AppState> for ChatWebService {
 }
 
 #[async_trait]
-impl Provider<AppState> for ChatWebService {
+impl Component<AppState> for ChatWebService {
+    #[cfg(not(feature = "webtransport"))]
+    type Deps = (Arc<ChatConfigProvider>, Option<Arc<H2ConnectRegistry>>);
+    #[cfg(feature = "webtransport")]
+    type Deps = (
+        Arc<ChatConfigProvider>,
+        Option<Arc<H2ConnectRegistry>>,
+        Option<Arc<WebTransportRegistry>>,
+    );
+
     fn name(&self) -> &'static str {
         "ChatWebService"
     }
 
-    /// Contributes handlers to the edge registries from the applied
-    /// configuration; nothing is bound or opened here.
-    async fn boot(
-        &self,
-        state: &AppState,
-    ) -> claviron::runtime::registry::Result<()> {
-        let cfg_provider = self.config_provider()?.clone();
-        let cfg = cfg_provider.current();
-        if cfg.enabled
-            && let Some(registry) =
-                state.registry_ref().resolve::<H2ConnectRegistry>()
-        {
-            let path = cfg.h2_connect_route_path();
-            for host in cfg.vhosts() {
-                if let Err(err) = registry.register_handler_for_host(
-                    &host.to_string(),
-                    path.clone(),
-                    Arc::new(ChatH2ConnectHandler::new(cfg_provider.clone())),
-                ) {
-                    warn!(
-                        "failed to register chat H2 CONNECT binding for vhost {} at {}: {}",
-                        host, path, err
-                    );
-                }
-            }
-        }
-        #[cfg(feature = "webtransport")]
-        if cfg.enabled
-            && let Some(registry) =
-                state.registry_ref().resolve::<WebTransportRegistry>()
-        {
-            let path = cfg.web_transport_route_path();
-            for host in cfg.vhosts() {
-                if let Err(err) = registry.register_handler_for_host(
-                    &host.to_string(),
-                    path.clone(),
-                    Arc::new(ChatWebTransportHandler::new(
-                        cfg_provider.clone(),
-                    )),
-                ) {
-                    warn!(
-                        "failed to register chat WebTransport binding for vhost {} at {}: {}",
-                        host, path, err
-                    );
-                }
-            }
-        }
-        Ok(())
+    fn as_bootable(&self) -> Option<&dyn Bootable<AppState, Self::Deps>> {
+        Some(self)
     }
 
     // No `as_reloadable` — `ChatConfigProvider` owns config reload and
@@ -149,5 +114,62 @@ impl Routable for ChatWebService {
             path,
             Arc::new(ChatWsUpgradeHandler::new(cfg_provider)),
         )?])
+    }
+}
+
+#[async_trait]
+impl Bootable<AppState, <Self as Component<AppState>>::Deps>
+    for ChatWebService
+{
+    /// Contributes handlers to the edge registries from the applied
+    /// configuration; nothing is bound or opened here.
+    async fn boot(
+        &self,
+        deps: <Self as Component<AppState>>::Deps,
+        _state: &AppState,
+    ) -> claviron::runtime::registry::Result<()> {
+        #[cfg(not(feature = "webtransport"))]
+        let (cfg_provider, h2) = deps;
+        #[cfg(feature = "webtransport")]
+        let (cfg_provider, h2, webtransport) = deps;
+        let cfg = cfg_provider.current();
+        if cfg.enabled
+            && let Some(registry) = h2
+        {
+            let path = cfg.h2_connect_route_path();
+            for host in cfg.vhosts() {
+                if let Err(err) = registry.register_handler_for_host(
+                    &host.to_string(),
+                    path.clone(),
+                    Arc::new(ChatH2ConnectHandler::new(cfg_provider.clone())),
+                ) {
+                    warn!(
+                        "failed to register chat H2 CONNECT binding for vhost {} at {}: {}",
+                        host, path, err
+                    );
+                }
+            }
+        }
+        #[cfg(feature = "webtransport")]
+        if cfg.enabled
+            && let Some(registry) = webtransport
+        {
+            let path = cfg.web_transport_route_path();
+            for host in cfg.vhosts() {
+                if let Err(err) = registry.register_handler_for_host(
+                    &host.to_string(),
+                    path.clone(),
+                    Arc::new(ChatWebTransportHandler::new(
+                        cfg_provider.clone(),
+                    )),
+                ) {
+                    warn!(
+                        "failed to register chat WebTransport binding for vhost {} at {}: {}",
+                        host, path, err
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 }

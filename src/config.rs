@@ -12,7 +12,7 @@ use claviron::helpers::de::{
 use claviron::runtime::congif::{
     self, ConfigFile, ConfigObserver, Configurable,
 };
-use claviron::runtime::registry::{Provider, Reloadable, priority};
+use claviron::runtime::registry::{Component, Reloadable, priority};
 use claviron::runtime::{AppState, Register};
 use claviron::tls::auth::verifier::PolicyConfig;
 use serde::Deserialize;
@@ -67,13 +67,15 @@ impl ChatConfigProvider {
 impl Register<AppState> for ChatConfigProvider {
     fn register(state: &AppState) -> claviron::runtime::registry::Result<()> {
         state.bind_config_environment::<Self>()?;
-        state.registry_ref().insert(Arc::new(Self::new(state)))?;
+        state.registry_ref().register(Arc::new(Self::new(state)))?;
         Ok(())
     }
 }
 
 #[async_trait]
-impl Provider<AppState> for ChatConfigProvider {
+impl Component<AppState> for ChatConfigProvider {
+    type Deps = ();
+
     fn name(&self) -> &'static str {
         "ChatConfigProvider"
     }

@@ -10,7 +10,7 @@ use claviron::orbit::FleetEventRegistry;
 use claviron::orbit::placement::{Scope, Scoped};
 use claviron::runtime::events::ProcessEventBus;
 use claviron::runtime::registry::{
-    Error as RegistryError, Provider, Reloadable, Runnable,
+    Bootable, Component, Error as RegistryError, Reloadable, Runnable,
 };
 use claviron::runtime::{AppState, Register, RunContext};
 use time::OffsetDateTime;
@@ -42,7 +42,7 @@ use crate::{AvatarUrlProvider, ChatClient};
 ///
 /// Lifecycle: `Register` constructs an `empty()` instance with its
 /// `ChatConfigProvider` and the process event bus in hand — only in-memory
-/// state (clients, rooms) besides. `Provider::boot()` derives the rate
+/// state (clients, rooms) besides. `Bootable::boot()` derives the rate
 /// limiter from the applied configuration and, when chat is enabled, takes
 /// the identity, auth and database handles from the registry; nothing is
 /// opened or spawned there. `Runnable::run`, scoped to workers, starts the
@@ -60,24 +60,24 @@ pub struct ChatServer {
     /// Active rooms (room_name -> room)
     rooms: Arc<RwLock<HashMap<String, ChatRoom>>>,
 
-    /// Message storage (PostgreSQL). Set once at `Provider::boot()`.
+    /// Message storage (PostgreSQL). Set once at `Bootable::boot()`.
     message_store: Arc<OnceLock<MessageStore>>,
 
-    /// Message receipt storage (PostgreSQL). Set once at `Provider::boot()`.
+    /// Message receipt storage (PostgreSQL). Set once at `Bootable::boot()`.
     receipt_store: Arc<OnceLock<ReceiptStore>>,
 
     /// Cached `ChatConfigProvider` — the single source of truth for
-    /// `chat.yaml`. Set once at `Provider::boot()`; reads thereafter
+    /// `chat.yaml`. Set once at `Bootable::boot()`; reads thereafter
     /// are lock-free `ArcSwap` loads via the provider's `current()`.
     config_provider: Arc<OnceLock<Arc<ChatConfigProvider>>>,
 
     /// Rate limiter for spam prevention. Derived from the provider's
     /// snapshot at boot/reload — kept here because it's a runtime
-    /// object (not a config slice). `None` until `Provider::boot()`
+    /// object (not a config slice). `None` until `Bootable::boot()`
     /// runs; `check_rate_limit` fails open in that window.
     rate_limiter: Arc<ArcSwapOption<ChatRateLimiter>>,
 
-    /// Postgres pool. Set once at `Provider::boot()` from `DbService`.
+    /// Postgres pool. Set once at `Bootable::boot()` from `DbService`.
     db_pool: Arc<OnceLock<sqlx::PgPool>>,
 
     /// Process-local event bus used as the chat fanout ingress. The
@@ -99,7 +99,7 @@ pub struct ChatServer {
 impl ChatServer {
     /// Empty constructor — no I/O, no registry resolves, no fake config
     /// seeding. `Register` hands it the config provider and the event bus;
-    /// `Provider::boot()` fills the identity and database slots.
+    /// `Bootable::boot()` fills the identity and database slots.
     pub fn empty() -> Self {
         Self {
             clients: Arc::default(),
@@ -118,17 +118,17 @@ impl ChatServer {
         }
     }
 
-    /// Returns the postgres pool. Panics if called before `Provider::boot()`.
+    /// Returns the postgres pool. Panics if called before `Bootable::boot()`.
     pub fn pool(&self) -> &sqlx::PgPool {
         self.db_pool
             .get()
-            .expect("ChatServer::pool() called before Provider::boot() ran")
+            .expect("ChatServer::pool() called before Bootable::boot() ran")
     }
 
     fn users(&self) -> &dyn UserProvider {
         self.users
             .get()
-            .expect("ChatServer::users() called before Provider::boot() ran")
+            .expect("ChatServer::users() called before Bootable::boot() ran")
             .as_ref()
     }
 
@@ -204,10 +204,10 @@ impl ChatServer {
     }
 
     /// Cached `ChatConfigProvider` reference. Panics if called before
-    /// `Provider::boot()` (which is when the OnceLock is populated).
+    /// `Bootable::boot()` (which is when the OnceLock is populated).
     fn config_provider(&self) -> &ChatConfigProvider {
         self.config_provider.get().expect(
-            "ChatServer::config_provider() called before Provider::boot() ran",
+            "ChatServer::config_provider() called before Bootable::boot() ran",
         )
     }
 
@@ -236,7 +236,7 @@ impl ChatServer {
         &self,
         connection_id: Uuid,
     ) -> Result<(), u64> {
-        // `None` only happens before `Provider::boot()` runs — the
+        // `None` only happens before `Bootable::boot()` runs — the
         // listener doesn't bind in that window, so a request reaching
         // here without a limiter is an invariant break, not an
         // operator state. Fail open with `Ok(())` rather than panic.
@@ -1933,89 +1933,31 @@ impl Register<AppState> for ChatServer {
         let server = ChatServer::empty();
         let _ = server.config_provider.set(cfg_provider);
         let _ = server.events.set(state.events().bus().clone());
-        state.registry_ref().insert(Arc::new(server))?;
+        state.registry_ref().register(Arc::new(server))?;
         Ok(())
     }
 }
 
 #[async_trait]
-impl Provider<AppState> for ChatServer {
+impl Component<AppState> for ChatServer {
+    // Disabled chat does not require DB; an available fleet bridge is bound at boot.
+    type Deps = (Option<Arc<DbService>>, Option<Arc<FleetEventRegistry>>);
+
     fn name(&self) -> &'static str {
         "ChatServer"
     }
 
-    /// Derive the rate limiter from the applied configuration and — if chat
-    /// is enabled — take the identity, auth and database handles from the
-    /// registry. No file I/O, nothing opened, nothing spawned.
-    async fn boot(
-        &self,
-        state: &AppState,
-    ) -> claviron::runtime::registry::Result<()> {
-        let cfg = self.config_snapshot();
-        let new_rate_limiter = ChatRateLimiter::new(
-            cfg.rate_limit.window,
-            cfg.rate_limit.max_messages,
-        );
-        self.rate_limiter.store(Some(Arc::new(new_rate_limiter)));
-
-        if !cfg.enabled {
-            return Ok(());
-        }
-
-        let users = state
-            .registry_ref()
-            .resolve_dyn::<dyn UserProvider>()
-            .ok_or_else(|| {
-                RegistryError::msg("ChatServer boot: UserProvider not bound")
-            })?;
-        let auth = state.registry_ref().resolve_dyn::<dyn TokenAuthenticator>();
-        if cfg.auth.guard_enabled(crate::config::ChatAuthGuard::Orbit)
-            && auth.is_none()
-        {
-            return Err(RegistryError::msg(
-                "ChatServer boot: Orbit TokenAuthenticator not bound",
-            ));
-        }
-        if let Some(auth) = auth {
-            let _ = self.auth.set(auth);
-        }
-        let avatars =
-            state.registry_ref().resolve_dyn::<dyn AvatarUrlProvider>();
-        let _ = self.users.set(users);
-        let _ = self.avatars.set(avatars);
-
-        let db =
-            state.registry_ref().resolve::<DbService>().ok_or_else(|| {
-                RegistryError::msg("ChatServer boot: DbService not registered")
-            })?;
-        let pool = db.claviron_pool().ok_or_else(|| {
-            RegistryError::msg("ChatServer boot: claviron postgres pool unavailable from DbService")
-        })?;
-
-        let _ = self.db_pool.set(pool.clone());
-        let _ = self.message_store.set(MessageStore::new(pool.clone()));
-        let _ = self.receipt_store.set(ReceiptStore::new(pool));
-
-        if let Some(registry) =
-            state.registry_ref().resolve::<FleetEventRegistry>()
-        {
-            registry.register_bridge::<ChatDeliveryEvent>(state)?;
-            registry.register_bridge::<ChatPresenceEvent>(state)?;
-        } else {
-            warn!(
-                "ChatServer booted without FleetEventRegistry; chat fanout and presence are worker-local"
-            );
-        }
-
-        info!("📦 ChatServer booted");
-        Ok(())
+    fn as_bootable(&self) -> Option<&dyn Bootable<AppState, Self::Deps>> {
+        Some(self)
     }
 
     fn as_reloadable(&self) -> Option<&dyn Reloadable<AppState>> {
         Some(self)
     }
 
-    fn as_runnable(self: Arc<Self>) -> Option<Arc<dyn Runnable<AppState>>> {
+    fn as_runnable(
+        self: Arc<Self>
+    ) -> Option<Arc<dyn Runnable<AppState, Self::Deps>>> {
         Some(self)
     }
 
@@ -2036,9 +1978,10 @@ impl Scoped for ChatServer {
 /// refresh, started when the process runs and ended with it. `enabled: false`
 /// runs nothing.
 #[async_trait]
-impl Runnable<AppState> for ChatServer {
+impl Runnable<AppState, <Self as Component<AppState>>::Deps> for ChatServer {
     async fn run(
         self: Arc<Self>,
+        _deps: <Self as Component<AppState>>::Deps,
         state: AppState,
         context: RunContext,
     ) -> claviron::runtime::registry::Result<()> {
@@ -2068,6 +2011,76 @@ impl Reloadable<AppState> for ChatServer {
             cfg.rate_limit.max_messages,
         );
         self.rate_limiter.store(Some(Arc::new(new_rate_limiter)));
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Bootable<AppState, <Self as Component<AppState>>::Deps> for ChatServer {
+    /// Derive the rate limiter from the applied configuration and — if chat
+    /// is enabled — take the identity, auth and database handles from the
+    /// registry. No file I/O, nothing opened, nothing spawned.
+    async fn boot(
+        &self,
+        (db, events): <Self as Component<AppState>>::Deps,
+        state: &AppState,
+    ) -> claviron::runtime::registry::Result<()> {
+        let cfg = self.config_snapshot();
+        let new_rate_limiter = ChatRateLimiter::new(
+            cfg.rate_limit.window,
+            cfg.rate_limit.max_messages,
+        );
+        self.rate_limiter.store(Some(Arc::new(new_rate_limiter)));
+
+        if !cfg.enabled {
+            return Ok(());
+        }
+
+        // Identity/auth are bound DI capabilities, not lifecycle components.
+        // Requiring them does not imply a component boot-order edge.
+        let users = state
+            .registry_ref()
+            .resolve_dyn::<dyn UserProvider>()
+            .ok_or_else(|| {
+                RegistryError::msg("ChatServer boot: UserProvider not bound")
+            })?;
+        let auth = state.registry_ref().resolve_dyn::<dyn TokenAuthenticator>();
+        if cfg.auth.guard_enabled(crate::config::ChatAuthGuard::Orbit)
+            && auth.is_none()
+        {
+            return Err(RegistryError::msg(
+                "ChatServer boot: Orbit TokenAuthenticator not bound",
+            ));
+        }
+        if let Some(auth) = auth {
+            let _ = self.auth.set(auth);
+        }
+        let avatars =
+            state.registry_ref().resolve_dyn::<dyn AvatarUrlProvider>();
+        let _ = self.users.set(users);
+        let _ = self.avatars.set(avatars);
+
+        let db = db.ok_or_else(|| {
+            RegistryError::msg("ChatServer boot: DbService not registered")
+        })?;
+        let pool = db.claviron_pool().ok_or_else(|| {
+            RegistryError::msg("ChatServer boot: claviron postgres pool unavailable from DbService")
+        })?;
+
+        let _ = self.db_pool.set(pool.clone());
+        let _ = self.message_store.set(MessageStore::new(pool.clone()));
+        let _ = self.receipt_store.set(ReceiptStore::new(pool));
+
+        if let Some(registry) = events {
+            registry.register_bridge::<ChatDeliveryEvent>(state)?;
+            registry.register_bridge::<ChatPresenceEvent>(state)?;
+        } else {
+            warn!(
+                "ChatServer booted without FleetEventRegistry; chat fanout and presence are worker-local"
+            );
+        }
+
+        info!("📦 ChatServer booted");
         Ok(())
     }
 }
