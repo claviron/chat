@@ -10,7 +10,8 @@ use claviron::orbit::FleetEventRegistry;
 use claviron::orbit::placement::{Scope, Scoped};
 use claviron::runtime::events::ProcessEventBus;
 use claviron::runtime::registry::{
-    Bootable, Component, Error as RegistryError, Reloadable, Runnable,
+    Bootable, Component, ComponentOrder, Error as RegistryError, Reloadable,
+    Runnable,
 };
 use claviron::runtime::{AppState, Register, RunContext};
 use time::OffsetDateTime;
@@ -2008,6 +2009,15 @@ impl Component<AppState> for ChatServer {
         "ChatServer"
     }
 
+    fn order(&self) -> ComponentOrder {
+        // Plain DI capabilities may be published during their owner's boot.
+        // Use existing interface types as preparation targets, not host-app types.
+        ComponentOrder::new()
+            .after::<Arc<dyn UserProvider>>()
+            .after::<Arc<dyn SessionAuthenticator>>()
+            .after::<Arc<dyn AvatarUrlProvider>>()
+    }
+
     fn as_bootable(&self) -> Option<&dyn Bootable<AppState, Self::Deps>> {
         Some(self)
     }
@@ -2157,3 +2167,7 @@ impl Bootable<AppState, <Self as Component<AppState>>::Deps> for ChatServer {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/user_provider_order.rs"]
+mod user_provider_order_tests;

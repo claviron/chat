@@ -201,6 +201,14 @@ numeric message keys, and raw-QUIC identifiers are hydrated through it. A user
 must expose an `i32`-compatible `auth_local_id` and, for the current wire
 contract, a UUID `auth_subject`.
 
+The provider can be an existing plain repository published with registry
+`insert`/`bind_dyn`; it needs no lifecycle traits or chat-specific forwarding
+implementation. When its owner publishes it during boot, that owner declares
+`ComponentOrder::before::<Arc<dyn UserProvider>>()`. Chat orders after that
+existing interface's preparation target. SessionAuthenticator and
+AvatarUrlProvider use the same ordering convention, allowing host-owned
+capabilities to become ready without chat naming any application service.
+
 Chat also defines the optional `AvatarUrlProvider`. The downstream application
 owns avatar storage, hash/MIME interpretation, CDN selection, and URL policy;
 chat asks only for the final URL while constructing a `ChatUser` snapshot. A
