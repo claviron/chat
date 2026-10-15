@@ -389,6 +389,34 @@ worker. `ChatServer` boots when chat is enabled so handlers have local
 connection registries and DB-backed runtime state available where the
 request is served.
 
+## Chat log channel
+
+The optional `log-pipeline` feature uses `claviron::logging::pipeline`.
+Declare a `chat` channel in the host's `logging.yaml`:
+
+```yaml
+channels:
+  chat:
+    adapter: file
+    path: storage/logs/chat.log
+    format: json
+```
+
+Chat resolves the channel once at boot and again on explicit service reload.
+Without the feature, registered pipeline, or declared channel, it produces no
+channel records; existing system diagnostics remain available through `tracing`.
+After adding a previously absent channel, explicitly reload chat or restart.
+Claviron owns buffering, writing, destination reload and rotation. Chat opens
+no files, installs no subscriber, and does no per-message registry lookup.
+
+The channel records boot, local connection/disconnection, presence, room
+membership, message acceptance, delivery/read status, and command failures.
+Delivery metadata is recorded only at the originating worker, not on every
+fleet fanout recipient. Message content, credentials, raw command errors and
+typing events are excluded. Channel publication failures go to `tracing`, not
+back into the failed channel. Channel levels are explicit record metadata;
+`RUST_LOG` continues to control system diagnostics, not these records.
+
 ## Worker Fanout
 
 `ChatServer` keeps only worker-local connection and room membership

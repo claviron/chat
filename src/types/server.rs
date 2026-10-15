@@ -6,6 +6,8 @@ use async_trait::async_trait;
 use claviron::auth::UserProvider;
 use claviron::auth::orbit::TokenAuthenticator;
 use claviron::db::DbService;
+#[cfg(feature = "log-pipeline")]
+use claviron::logging::pipeline::{Level, LogChannels, Value};
 use claviron::orbit::FleetEventRegistry;
 use claviron::orbit::placement::{Scope, Scoped};
 use claviron::runtime::events::ProcessEventBus;
@@ -52,6 +54,8 @@ use crate::{
 /// `chat.yaml` directly.
 #[derive(Clone)]
 pub struct ChatServer {
+    #[cfg(feature = "log-pipeline")]
+    log: Arc<ArcSwapOption<crate::log::ChatLog>>,
     /// Connected clients (connection_id -> client)
     clients: Arc<RwLock<HashMap<Uuid, ChatClient>>>,
 
@@ -102,11 +106,29 @@ pub struct ChatServer {
 }
 
 impl ChatServer {
+    pub(crate) fn log_command_failure(
+        &self,
+        user_id: i32,
+    ) {
+        #[cfg(feature = "log-pipeline")]
+        if let Some(log) = self.log.load().as_ref() {
+            log.record(
+                Level::Warn,
+                "Chat command failed",
+                &[("user_id", Value::I64(i64::from(user_id)))],
+            );
+        }
+        #[cfg(not(feature = "log-pipeline"))]
+        let _ = user_id;
+    }
+
     /// Empty constructor — no I/O, no registry resolves, no fake config
     /// seeding. `Register` hands it the config provider and the event bus;
     /// `Bootable::boot()` fills the identity and database slots.
     pub fn empty() -> Self {
         Self {
+            #[cfg(feature = "log-pipeline")]
+            log: Arc::default(),
             clients: Arc::default(),
             user_connections: Arc::default(),
             rooms: Arc::default(),
@@ -289,6 +311,10 @@ impl ChatServer {
         &self,
         event: ChatDeliveryEvent,
     ) {
+        #[cfg(feature = "log-pipeline")]
+        if let Some(log) = self.log.load().as_ref() {
+            log.delivery(&event);
+        }
         match self.events.get() {
             Some(bus) => bus.emit(event),
             None => warn!(
@@ -772,6 +798,18 @@ impl ChatServer {
         let username = client.user().username();
         let connection_id = client.connection_id();
 
+        #[cfg(feature = "log-pipeline")]
+        if let Some(log) = self.log.load().as_ref() {
+            log.record(
+                Level::Info,
+                "Chat client connected",
+                &[
+                    ("user_id", Value::I64(i64::from(user_id))),
+                    ("connection_id", Value::Str(&connection_id.to_string())),
+                ],
+            );
+        }
+
         // Add to clients map
         {
             let mut clients = self.clients.write().await;
@@ -941,6 +979,18 @@ impl ChatServer {
         } else {
             false
         };
+
+        #[cfg(feature = "log-pipeline")]
+        if let Some(log) = self.log.load().as_ref() {
+            log.record(
+                Level::Info,
+                "Chat client disconnected",
+                &[
+                    ("user_id", Value::I64(i64::from(user_id))),
+                    ("connection_id", Value::Str(&connection_id.to_string())),
+                ],
+            );
+        }
 
         // Send global offline only after the fleet's last known connection closes.
         if user_remaining_connections == 0 && !user_present_remotely {
@@ -2043,6 +2093,13 @@ impl Register<AppState> for ChatServer {
 #[async_trait]
 impl Component<AppState> for ChatServer {
     // Disabled chat does not require DB; an available fleet bridge is bound at boot.
+    #[cfg(feature = "log-pipeline")]
+    type Deps = (
+        Option<Arc<DbService>>,
+        Option<Arc<FleetEventRegistry>>,
+        Option<Arc<LogChannels>>,
+    );
+    #[cfg(not(feature = "log-pipeline"))]
     type Deps = (Option<Arc<DbService>>, Option<Arc<FleetEventRegistry>>);
 
     fn name(&self) -> &'static str {
@@ -2118,6 +2175,15 @@ impl Reloadable<AppState> for ChatServer {
         // so by the time we get here its snapshot is already fresh.
         let cfg = self.config_provider().current();
 
+        #[cfg(feature = "log-pipeline")]
+        self.log.store(
+            _state
+                .registry_ref()
+                .resolve::<LogChannels>()
+                .and_then(crate::log::ChatLog::resolve)
+                .map(Arc::new),
+        );
+
         let new_rate_limiter = ChatRateLimiter::new(
             cfg.rate_limit.window,
             cfg.rate_limit.max_messages,
@@ -2134,9 +2200,13 @@ impl Bootable<AppState, <Self as Component<AppState>>::Deps> for ChatServer {
     /// registry. No file I/O, nothing opened, nothing spawned.
     async fn boot(
         &self,
-        (db, events): <Self as Component<AppState>>::Deps,
+        deps: <Self as Component<AppState>>::Deps,
         state: &AppState,
     ) -> claviron::runtime::registry::Result<()> {
+        #[cfg(feature = "log-pipeline")]
+        let (db, events, channels) = deps;
+        #[cfg(not(feature = "log-pipeline"))]
+        let (db, events) = deps;
         let cfg = self.config_snapshot();
         let new_rate_limiter = ChatRateLimiter::new(
             cfg.rate_limit.window,
@@ -2147,6 +2217,11 @@ impl Bootable<AppState, <Self as Component<AppState>>::Deps> for ChatServer {
         if !cfg.has_ingress() {
             return Ok(());
         }
+
+        #[cfg(feature = "log-pipeline")]
+        self.log.store(
+            channels.and_then(crate::log::ChatLog::resolve).map(Arc::new),
+        );
 
         // Identity/auth are bound DI capabilities, not lifecycle components.
         // Requiring them does not imply a component boot-order edge.
@@ -2209,6 +2284,10 @@ impl Bootable<AppState, <Self as Component<AppState>>::Deps> for ChatServer {
         }
 
         info!("📦 ChatServer booted");
+        #[cfg(feature = "log-pipeline")]
+        if let Some(log) = self.log.load().as_ref() {
+            log.record(Level::Info, "Chat server booted", &[]);
+        }
         Ok(())
     }
 }

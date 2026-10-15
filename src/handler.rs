@@ -279,6 +279,7 @@ pub(crate) async fn handle_client_message(
             let _ = client.send(ServerMessage::success(msg)).await;
         }
         Err(error) => {
+            server.log_command_failure(client.user_id());
             let _ = client.send(ServerMessage::error(error)).await;
         }
         _ => {}

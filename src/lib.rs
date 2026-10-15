@@ -5,6 +5,8 @@ mod error;
 mod event;
 pub(crate) mod handler;
 mod identity;
+#[cfg(feature = "log-pipeline")]
+mod log;
 #[allow(unused)]
 mod models;
 mod presence;

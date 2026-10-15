@@ -16,6 +16,7 @@ autotests = false
 
 [features]
 default = []
+log-pipeline = ["claviron/log-pipeline"]
 quic = [
     "dep:quinn",
     "dep:h3",
