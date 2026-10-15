@@ -12,7 +12,7 @@ use h3_webtransport::server::AcceptedBi;
 use tokio::sync::mpsc;
 use tracing::{debug, error, warn};
 
-use super::auth::extract_user_from_authorization;
+use super::auth::{extract_session_user, extract_user_from_authorization};
 use super::framing::{read_client_message, write_server_message};
 use crate::config::ChatConfigProvider;
 use crate::svc::WELCOME_MESSAGE;
@@ -44,12 +44,23 @@ impl WebTransportHandler for ChatWebTransportHandler {
         state: &AppState,
         ctx: &AuthContext,
     ) -> WebTransportResult {
+        let cfg = self.config_provider.current();
+        if cfg.auth.guard_enabled(crate::config::ChatAuthGuard::Session) {
+            let user = extract_session_user(
+                state,
+                ctx.host.to_cow_str().as_ref(),
+                &ctx.headers,
+                &cfg,
+            )
+            .await
+            .map_err(WebTransportReject::new)?;
+            return Ok(WebTransportAccept::authenticated(user));
+        }
         let authorization = ctx
             .headers
             .get(http::header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
             .ok_or_else(WebTransportReject::unauthorized)?;
-        let cfg = self.config_provider.current();
         let user =
             extract_user_from_authorization(authorization, state, &cfg.auth)
                 .await

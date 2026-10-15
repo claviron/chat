@@ -13,6 +13,28 @@ use crate::error::AuthError;
 use crate::models::users::ChatUser;
 use crate::types::client::ChatAuthentication;
 
+/// Same-origin session admission is exclusive: invalid cookies never fall
+/// back to tickets or a separately configured token authority.
+pub(crate) async fn extract_session_user(
+    state: &AppState,
+    vhost: &str,
+    headers: &http::HeaderMap,
+    config: &crate::config::ChatConfig,
+) -> Result<ChatAuthentication, http::StatusCode> {
+    let origin =
+        headers.get(http::header::ORIGIN).and_then(|value| value.to_str().ok());
+    let validator =
+        super::validator::OriginValidator::new(&config.allowed_origins);
+    if !origin.is_some_and(|origin| validator.is_allowed(origin)) {
+        return Err(http::StatusCode::FORBIDDEN);
+    }
+    let chat = state
+        .registry_ref()
+        .resolve::<ChatServer>()
+        .ok_or(http::StatusCode::SERVICE_UNAVAILABLE)?;
+    chat.authenticate_session(vhost, headers).await
+}
+
 /// Extract authenticated user from the already-owned WebSocket subprotocol.
 pub(crate) async fn extract_user_from_protocol(
     protocol_str: String,
@@ -40,6 +62,9 @@ pub(crate) async fn extract_user_from_protocol(
             .await?;
             Ok((ChatAuthentication { user, session: None }, protocol_str))
         }
+        ChatAuthGuard::Session => {
+            Err("session auth requires request headers".into())
+        }
     }
 }
 
@@ -59,6 +84,9 @@ pub(crate) async fn extract_user_from_authorization(
             extract_ticket_user_from_bearer(credential, state, &auth.ticket)
                 .await
                 .map(|user| ChatAuthentication { user, session: None })
+        }
+        ChatAuthGuard::Session => {
+            Err("session auth requires request headers".into())
         }
     }
 }

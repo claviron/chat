@@ -74,12 +74,14 @@ export class ChatClient extends EventTarget {
 
   connectWebSocket(boot) {
     return new Promise((resolve, reject) => {
-      if (!boot?.websocket_url || !boot?.websocket_subprotocol) {
+      if (!boot?.websocket_url || (boot.guard !== "session" && !boot.websocket_subprotocol)) {
         reject(new Error("chat ticket response is missing websocket binding"));
         return;
       }
 
-      const socket = new WebSocket(boot.websocket_url, [boot.websocket_subprotocol]);
+      const socket = boot.guard === "session"
+        ? new WebSocket(boot.websocket_url)
+        : new WebSocket(boot.websocket_url, [boot.websocket_subprotocol]);
       socket.binaryType = "arraybuffer";
       this.socket = socket;
 
@@ -142,6 +144,17 @@ export class ChatClient extends EventTarget {
         return this.fetchTicket();
       case "orbit":
         return this.orbitBoot();
+      case "session": {
+        const address = this.options.websocketUrl || this.options.websocket_url;
+        if (!address) throw new Error("session chat auth requires websocketUrl");
+        const url = new URL(address, globalThis.location.href);
+        url.protocol = url.protocol === "https:" || url.protocol === "wss:" ? "wss:" : "ws:";
+        const protocol = globalThis.location.protocol === "https:" ? "wss:" : "ws:";
+        if (url.host !== globalThis.location.host || url.protocol !== protocol) {
+          throw new Error("session chat requires the current origin");
+        }
+        return {guard: "session", websocket_url: url.href};
+      }
       default:
         throw new Error(`unsupported chat auth mode: ${this.options.auth}`);
     }

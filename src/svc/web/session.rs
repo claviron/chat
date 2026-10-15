@@ -20,6 +20,7 @@ pub(crate) async fn handle_websocket(
     upgraded: Upgraded,
     state: AppState,
     authenticated: crate::types::client::ChatAuthentication,
+    graceful: impl std::future::Future<Output = ()> + Send,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let crate::types::client::ChatAuthentication {
         user,
@@ -105,9 +106,12 @@ pub(crate) async fn handle_websocket(
         "💬 Starting WebSocket event loop"
     );
 
+    tokio::pin!(graceful);
+
     // Main event loop - no deadlocks, clean and simple!
     loop {
         tokio::select! {
+            _ = &mut graceful => break,
             // 1) Shutdown signal
             _ = state.on_shutdown() => {
                 warn!(

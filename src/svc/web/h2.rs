@@ -19,7 +19,7 @@ use http_body_util::{BodyExt, StreamBody};
 use tokio::sync::mpsc;
 use tracing::{debug, error, trace, warn};
 
-use super::auth::extract_user_from_authorization;
+use super::auth::{extract_session_user, extract_user_from_authorization};
 use super::framing::{
     FRAME_PREFIX_LEN, decode_client_message, encode_server_message,
 };
@@ -52,12 +52,23 @@ impl H2ConnectHandler for ChatH2ConnectHandler {
         state: &AppState,
         ctx: &AuthContext,
     ) -> H2ConnectResult {
+        let cfg = self.config_provider.current();
+        if cfg.auth.guard_enabled(crate::config::ChatAuthGuard::Session) {
+            let user = extract_session_user(
+                state,
+                ctx.host.to_cow_str().as_ref(),
+                &ctx.headers,
+                &cfg,
+            )
+            .await
+            .map_err(H2ConnectReject::new)?;
+            return Ok(H2ConnectAccept::authenticated(user));
+        }
         let authorization = ctx
             .headers
             .get(http::header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
             .ok_or_else(H2ConnectReject::unauthorized)?;
-        let cfg = self.config_provider.current();
         let user =
             extract_user_from_authorization(authorization, state, &cfg.auth)
                 .await

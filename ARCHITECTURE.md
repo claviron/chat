@@ -112,6 +112,14 @@ during boot; it does not bind a separate socket. Defaults come from
 serde default functions and are documented in `config/chat.yaml`
 (`/chat/ws`, `/chat/h2`, and `/chat/wt` by default).
 
+The WebSocket path is also registered for RFC 8441 extended CONNECT. It shares
+authentication and the MessagePack WebSocket session loop with H1; its 200
+response does not carry H1 key/accept/upgrade headers. The configured H2 path
+remains the separate native length-prefixed MessagePack stream protocol.
+H2 WebSocket work is submitted through the listener's existing SessionSpawner;
+H1 and H2 WebSockets observe its graceful signal and retire only their own
+connection. No detached WebSocket task or additional timeout is introduced.
+
 `config/chat.yaml` uses `vhosts` (or singular `vhost`) with `Vec<Host>`
 semantics, matching `config/grpc.yaml`. These entries are resolved vhost
 keys, not raw public aliases. Public aliases belong in
@@ -153,6 +161,24 @@ Web transports accept the configured `chat.auth.guards`. The default is `orbit`;
 `ticket` remains an explicitly separate cache-ticket path. JWT is no longer an
 accepted guard or credential. Existing `jwt` configuration/client selections must
 migrate to `orbit` and obtain an Orbit session-bound token from the host issuer.
+
+`session` is an exclusive alternative for same-origin applications. The host
+binds `dyn SessionAuthenticator`; chat passes the resolved canonical vhost key
+and handshake headers, and receives the existing `AuthenticatedSession`.
+Cookie names, guard/audience/type restrictions and storage remain application
+owned. A missing capability fails enabled chat boot. Session mode requires an
+explicit Origin allowlist and rejects missing/unlisted origins on all web
+transports. It never falls back to token/ticket guards or starts a guest session.
+User hydration uses the same optional avatar provider; the retained verified
+session is checked again after hydration and by the existing delivery checks.
+
+The browser client selects `auth: "session"` with an explicit same-origin
+`websocketUrl`; it opens a plain WebSocket using the browser's existing cookie,
+without requesting a ticket or proposing a credential subprotocol. The existing
+ticket and Orbit client modes remain available. Native H2 CONNECT and
+WebTransport also require the credential in their handshake in session mode;
+no new first-message authentication protocol is introduced. A browser transport
+that omits cookies cannot authenticate with this mode.
 
 - WebSocket uses `bearer.<base64url-unpadded-token>`; `ticket.` selects tickets.
 - H2 CONNECT and WebTransport use `Authorization: Bearer <token>`.
@@ -215,6 +241,11 @@ site endpoint that writes the JSON into the shared `chat` cache store;
 later it can move behind a `ChatProvider` or another host adapter. The
 client contract stays the same: the issuer returns client-ready values
 such as `websocket_subprotocol` and `authorization`.
+
+`stubs/php/ticket.php` provides the framework-neutral issuer shape, with explicit
+identity snapshot, endpoints, TTL and storage callback. `stubs/README.md` explains
+Laravel/raw-Redis integration. It contains no application database queries or
+cookie assumptions. A same-origin session deployment does not need this issuer.
 
 ## Run Gating
 

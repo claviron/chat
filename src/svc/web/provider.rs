@@ -138,6 +138,11 @@ impl Bootable<AppState, <Self as Component<AppState>>::Deps>
         {
             let path = cfg.h2_connect_route_path();
             for host in cfg.vhosts() {
+                registry.register_handler_for_host(
+                    &host.to_string(),
+                    cfg.websocket_route_path(),
+                    Arc::new(ChatWsUpgradeHandler::new(cfg_provider.clone())),
+                )?;
                 if let Err(err) = registry.register_handler_for_host(
                     &host.to_string(),
                     path.clone(),

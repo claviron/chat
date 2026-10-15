@@ -34,6 +34,19 @@ fn legacy_guard_remains_single_guard() {
 }
 
 #[test]
+fn session_guard_requires_an_origin_and_rejects_fallback_guards() {
+    let mut config: ChatConfig = serde_yaml::from_str(
+        "auth:\n  guards: [session]\n  default: session\n",
+    )
+    .unwrap();
+    assert!(config.validate().is_err());
+    config.allowed_origins = vec!["https://example.test".into()];
+    assert!(config.validate().is_ok());
+    config.auth.guards.push(ChatAuthGuard::Ticket);
+    assert!(config.validate().is_err());
+}
+
+#[test]
 fn parses_presence_durations() {
     let config: ChatConfig = serde_yaml::from_str(
         r#"

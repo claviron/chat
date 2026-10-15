@@ -293,6 +293,16 @@ impl ChatConfig {
     }
 
     fn validate(&self) -> Result<(), &'static str> {
+        if self.auth.guard_enabled(ChatAuthGuard::Session) {
+            if self.auth.enabled_guards().len() != 1 {
+                return Err(
+                    "session chat auth cannot fall back to other guards",
+                );
+            }
+            if self.allowed_origins.is_empty() {
+                return Err("session chat auth requires allowed_origins");
+            }
+        }
         if let Some(quic) = &self.quic {
             quic.validate()?;
         }
@@ -489,6 +499,7 @@ pub enum ChatAuthGuard {
     #[default]
     Orbit,
     Ticket,
+    Session,
 }
 
 #[derive(Clone, PartialEq, Deserialize)]

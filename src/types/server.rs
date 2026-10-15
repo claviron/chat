@@ -36,7 +36,7 @@ use crate::types::messages::{
     UserInfo,
 };
 use crate::types::room::ChatRoom;
-use crate::{AvatarUrlProvider, ChatClient};
+use crate::{AvatarUrlProvider, ChatClient, SessionAuthenticator};
 
 /// Global svc server state.
 ///
@@ -87,6 +87,7 @@ pub struct ChatServer {
     /// Application-owned identity lookup bound through the core auth contract.
     users: Arc<OnceLock<Arc<dyn UserProvider>>>,
     auth: Arc<OnceLock<Arc<dyn TokenAuthenticator>>>,
+    session_auth: Arc<OnceLock<Arc<dyn SessionAuthenticator>>>,
 
     /// Optional application-owned avatar URL projection.
     avatars: Arc<OnceLock<Option<Arc<dyn AvatarUrlProvider>>>>,
@@ -113,6 +114,7 @@ impl ChatServer {
             events: Arc::default(),
             users: Arc::default(),
             auth: Arc::default(),
+            session_auth: Arc::default(),
             avatars: Arc::default(),
             presence: PresenceRegistry::new(),
         }
@@ -156,6 +158,42 @@ impl ChatServer {
             crate::types::client::auth_now()
                 .ok_or("system clock unavailable")?,
         )?;
+        Ok(crate::types::client::ChatAuthentication {
+            user,
+            session: Some(authenticated.session),
+        })
+    }
+
+    pub(crate) async fn authenticate_session(
+        &self,
+        vhost: &str,
+        headers: &http::HeaderMap,
+    ) -> Result<crate::types::client::ChatAuthentication, http::StatusCode>
+    {
+        let authenticator = self
+            .session_auth
+            .get()
+            .ok_or(http::StatusCode::SERVICE_UNAVAILABLE)?;
+        let authenticated =
+            authenticator.authenticate_headers(vhost, headers).await?;
+        if authenticated.session.principal().session_id().is_none() {
+            return Err(http::StatusCode::UNAUTHORIZED);
+        }
+        let user = ChatUser::from_authenticated(
+            authenticated.user,
+            self.avatars(),
+        )
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "chat session identity hydration failed");
+            http::StatusCode::SERVICE_UNAVAILABLE
+        })?;
+        let now = crate::types::client::auth_now()
+            .ok_or(http::StatusCode::SERVICE_UNAVAILABLE)?;
+        authenticated
+            .session
+            .check(now)
+            .map_err(|_| http::StatusCode::UNAUTHORIZED)?;
         Ok(crate::types::client::ChatAuthentication {
             user,
             session: Some(authenticated.session),
@@ -2054,6 +2092,18 @@ impl Bootable<AppState, <Self as Component<AppState>>::Deps> for ChatServer {
         }
         if let Some(auth) = auth {
             let _ = self.auth.set(auth);
+        }
+        let session_auth =
+            state.registry_ref().resolve_dyn::<dyn SessionAuthenticator>();
+        if cfg.auth.guard_enabled(crate::config::ChatAuthGuard::Session)
+            && session_auth.is_none()
+        {
+            return Err(RegistryError::msg(
+                "ChatServer boot: SessionAuthenticator not bound",
+            ));
+        }
+        if let Some(auth) = session_auth {
+            let _ = self.session_auth.set(auth);
         }
         let avatars =
             state.registry_ref().resolve_dyn::<dyn AvatarUrlProvider>();

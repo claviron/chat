@@ -4,6 +4,17 @@ use async_trait::async_trait;
 use claviron::auth::Authenticated;
 use thiserror::Error;
 
+/// Application-owned session admission for same-origin chat transports.
+/// Cookie names, guard selection and identity storage remain with the host.
+#[async_trait]
+pub trait SessionAuthenticator: Send + Sync + 'static {
+    async fn authenticate_headers(
+        &self,
+        vhost: &str,
+        headers: &http::HeaderMap,
+    ) -> Result<claviron::auth::orbit::AuthenticatedSession, http::StatusCode>;
+}
+
 /// Failure returned by an application-owned avatar URL resolver.
 #[derive(Debug, Error)]
 #[error("avatar URL provider error: {0}")]
