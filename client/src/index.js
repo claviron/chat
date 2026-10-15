@@ -210,6 +210,14 @@ export class ChatClient extends EventTarget {
     this.send({ type: "get_history", room, ...historyWindow(options) });
   }
 
+  directHistory(userUuid, options = {}) {
+    this.send({ type: "get_direct_history", with_user_uuid: uuidToBytes(userUuid), ...historyWindow(options) });
+  }
+
+  unreadPrivate() {
+    this.send({ type: "get_unread_private" });
+  }
+
   markDelivered(uuid, room = null) {
     this.send({ type: "mark_delivered", uuid: uuidToBytes(uuid), room });
   }

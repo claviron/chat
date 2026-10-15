@@ -96,6 +96,13 @@ helpers, and a minimal Shadow DOM widget mount function. Host apps may
 serve this file directly, copy it to their asset pipeline, or replace the
 widget while keeping the same `ChatClient` transport contract.
 
+Room membership updates reuse the typed `UserList` server message, with the
+same avatar/online fields as an explicit `list_users` response. They are not
+synthetic `RoomMessage` entries from a service account with JSON in `content`.
+Welcome and presence are control events; full host UIs should not render them
+as conversation text. `directHistory` and `unreadPrivate` expose the existing
+private-conversation protocol without changing authentication or transport.
+
 ## Providers
 
 `ChatConfigProvider` owns `chat.yaml`. It loads once during boot,

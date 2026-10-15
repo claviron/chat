@@ -25,9 +25,7 @@ use crate::models::messages::MessageStore;
 use crate::models::receipts::ReceiptStore;
 #[cfg(feature = "quic")]
 use crate::models::users::by_identifier;
-use crate::models::users::{
-    ChatUser, by_local_id, by_subject, hydrate_users, system_user,
-};
+use crate::models::users::{ChatUser, by_local_id, by_subject, hydrate_users};
 use crate::presence::PresenceRegistry;
 use crate::svc::rate_limit::ChatRateLimiter;
 use crate::types::messages::{
@@ -235,10 +233,6 @@ impl ChatServer {
         ids: &[i32],
     ) -> Result<Vec<ChatUser>, String> {
         hydrate_users(self.users(), self.avatars(), ids).await
-    }
-
-    pub(crate) async fn system_user(&self) -> ChatUser {
-        system_user(self.users(), self.avatars()).await
     }
 
     /// Cached `ChatConfigProvider` reference. Panics if called before

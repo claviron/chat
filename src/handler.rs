@@ -1,5 +1,4 @@
 use tracing::debug;
-use uuid::Uuid;
 
 use crate::ChatServer;
 use crate::types::client::ChatClient;
@@ -280,34 +279,22 @@ pub(crate) async fn handle_client_message(
     }
 }
 
-/// Send user list to room with avatars and roles
+/// Publish presence as protocol data, never as a synthetic chat message.
 async fn send_user_list_to_room(
     server: &ChatServer,
     room_name: &str,
 ) {
-    let system_user = server.system_user().await;
-
-    if let Ok(room_users) = server.get_room_users(room_name).await
-        && let Ok(users_json) = serde_json::to_string(&room_users)
-    {
-        let msg = ServerMessage::RoomMessage {
-            uuid: Uuid::new_v4(),
-            room: room_name.to_string(),
-            from_user_uuid: system_user.uuid(),
-            from_username: system_user.username_arc().clone(),
-            from_avatar_url: system_user.avatar_arc().clone(),
-            content: format!(
-                "{{\"type\":\"user_list_update\",\"users\":{}}}",
-                users_json
-            ),
-            timestamp: time::OffsetDateTime::now_utc(),
-        };
-
+    if let Ok(users) = server.list_users(room_name).await {
         debug!(
             room = %room_name,
-            user_count = room_users.len(),
+            user_count = users.len(),
             "📤 Broadcasting user list to room"
         );
-        let _ = server.broadcast_to_room(room_name, msg).await;
+        let _ = server
+            .broadcast_to_room(
+                room_name,
+                ServerMessage::UserList { room: room_name.to_string(), users },
+            )
+            .await;
     }
 }

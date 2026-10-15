@@ -10,8 +10,6 @@ use uuid::Uuid;
 
 use crate::AvatarUrlProvider;
 
-const DEFAULT_CHAT_USER_SUBJECT: &str = "39493052-9a18-478c-8930-529a18478caa";
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ChatUser(Arc<CachedUser>);
@@ -220,26 +218,6 @@ pub(crate) async fn hydrate_users(
         }
     }
     Ok(hydrated)
-}
-
-pub(crate) async fn system_user(
-    users: &dyn UserProvider,
-    avatars: Option<&dyn AvatarUrlProvider>,
-) -> ChatUser {
-    if let Ok(Some(user)) =
-        by_subject(users, avatars, DEFAULT_CHAT_USER_SUBJECT).await
-    {
-        return user;
-    }
-    let uuid = Uuid::parse_str(DEFAULT_CHAT_USER_SUBJECT)
-        .expect("invalid default chat user UUID");
-    ChatUser::from_trusted_snapshot(
-        0,
-        uuid,
-        "svc",
-        "Claviron Chat",
-        format_avatar_from_name("Claviron Chat"),
-    )
 }
 
 pub(crate) fn user_invalidate(
