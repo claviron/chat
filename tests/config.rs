@@ -1,4 +1,28 @@
-use super::{ChatAuthConfig, ChatAuthGuard, ChatConfig, join_route_path};
+use super::{
+    ChatAuthConfig, ChatAuthGuard, ChatConfig, ChatHistoryConfig,
+    join_route_path,
+};
+
+#[test]
+fn validates_history_windows_and_bounds_every_request() {
+    let policy: ChatHistoryConfig = serde_yaml::from_str(
+        "initial_limit: 3\npage_limit: 2\nmax_limit: 4\nmax_messages_per_conversation: 8\nmax_conversations: 3\n",
+    ).unwrap();
+    assert!(policy.validate().is_ok());
+    assert_eq!(policy.request_limit(None).unwrap(), 3);
+    assert_eq!(policy.request_limit(Some(900)).unwrap(), 4);
+    assert!(policy.request_limit(Some(0)).is_err());
+    assert!(policy.request_limit(Some(-1)).is_err());
+    let invalid = ChatHistoryConfig { initial_limit: 5, ..policy.clone() };
+    assert!(invalid.validate().is_err());
+    let invalid = ChatHistoryConfig {
+        max_messages_per_conversation: 1,
+        ..policy.clone()
+    };
+    assert!(invalid.validate().is_err());
+    let invalid = ChatHistoryConfig { max_conversations: 1, ..policy };
+    assert!(invalid.validate().is_err());
+}
 
 #[test]
 fn joins_chat_transport_paths() {

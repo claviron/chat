@@ -122,6 +122,7 @@ pub async fn handle_quic_chat_stream(
             user.name_arc().clone(),
             WELCOME_MESSAGE,
             unread_summary.clone(),
+            chat_server.config_snapshot().history.clone(),
         );
 
         // Write Welcome directly to stream BEFORE event loop starts

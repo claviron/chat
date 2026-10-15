@@ -24,6 +24,7 @@ export class ChatClient extends EventTarget {
     this.connecting = false;
     this.closedByClient = false;
     this.reconnectAttempt = 0;
+    this.reconnectTimer = null;
   }
 
   async connect() {
@@ -32,11 +33,15 @@ export class ChatClient extends EventTarget {
     this.closedByClient = false;
     try {
       this.boot = await this.bootstrap();
+      if (this.closedByClient) return this;
       if (this.options.transport !== "websocket" && this.options.transport !== "auto") {
         throw new Error(`unsupported browser transport: ${this.options.transport}`);
       }
       await this.connectWebSocket(this.boot);
       return this;
+    } catch (error) {
+      this.scheduleReconnect();
+      throw error;
     } finally {
       this.connecting = false;
     }
@@ -44,6 +49,10 @@ export class ChatClient extends EventTarget {
 
   disconnect() {
     this.closedByClient = true;
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     this.connected = false;
     if (this.socket) {
       this.socket.close(1000, "client disconnect");
@@ -86,6 +95,11 @@ export class ChatClient extends EventTarget {
       this.socket = socket;
 
       socket.onopen = () => {
+        if (this.closedByClient || this.socket !== socket) {
+          socket.close(1000, "client disconnect");
+          reject(new Error("chat connection cancelled"));
+          return;
+        }
         this.connected = true;
         this.reconnectAttempt = 0;
         this.emit("state", { state: "connected", boot });
@@ -111,24 +125,26 @@ export class ChatClient extends EventTarget {
 
       socket.onclose = (event) => {
         const wasConnected = this.connected;
+        if (this.socket !== socket && !this.closedByClient) return;
         this.connected = false;
         this.socket = null;
         this.emit("state", { state: "closed", event });
-        if (wasConnected && !this.closedByClient && this.options.reconnect) {
-          this.scheduleReconnect();
-        }
+        if (!wasConnected) reject(new Error("chat websocket closed before opening"));
+        this.scheduleReconnect();
       };
     });
   }
 
   scheduleReconnect() {
+    if (this.closedByClient || !this.options.reconnect || this.reconnectTimer !== null) return;
     const delay = Math.min(
       this.options.reconnectMaxDelay,
       this.options.reconnectMinDelay * 2 ** this.reconnectAttempt,
     );
     this.reconnectAttempt += 1;
     this.emit("state", { state: "reconnecting", delay });
-    setTimeout(() => {
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
       if (!this.closedByClient) {
         this.connect().catch((error) => {
           this.emit("error", { error });

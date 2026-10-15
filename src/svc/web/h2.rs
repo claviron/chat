@@ -133,6 +133,7 @@ async fn handle_h2_chat(
             user.name_arc().clone(),
             WELCOME_MESSAGE,
             unread_summary,
+            chat_config.history.clone(),
         ))
         .await;
 

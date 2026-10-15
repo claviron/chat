@@ -135,6 +135,7 @@ impl MessageStore {
         &self,
         room: &str,
         since: OffsetDateTime,
+        limit: i64,
     ) -> Result<Vec<RoomMessage>, sqlx::Error> {
         let messages = sqlx::query_as::<_, RoomMessage>(
             r#"
@@ -142,10 +143,12 @@ impl MessageStore {
             FROM chat.room_messages
             WHERE room = $1 AND created_at > $2
             ORDER BY created_at ASC
+            LIMIT $3
             "#,
         )
         .bind(room)
         .bind(since)
+        .bind(limit)
         .fetch_all(&self.pool)
         .await?;
 
@@ -209,6 +212,7 @@ impl MessageStore {
         user1_id: i32,
         user2_id: i32,
         since: OffsetDateTime,
+        limit: i64,
     ) -> Result<Vec<PrivateMessage>, sqlx::Error> {
         let messages = sqlx::query_as::<_, PrivateMessage>(
             r#"
@@ -218,11 +222,13 @@ impl MessageStore {
                 OR (from_user_id = $2 AND to_user_id = $1))
               AND created_at > $3
             ORDER BY created_at ASC
+            LIMIT $4
             "#
         )
         .bind(user1_id)
         .bind(user2_id)
         .bind(since)
+        .bind(limit)
         .fetch_all(&self.pool)
         .await?;
 

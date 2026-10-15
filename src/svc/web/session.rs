@@ -83,6 +83,7 @@ pub(crate) async fn handle_websocket(
             user.name_arc().clone(),
             WELCOME_MESSAGE,
             unread_summary.clone(),
+            chat_config.history.clone(),
         );
 
         if let Err(e) = tx.send(welcome_msg).await {

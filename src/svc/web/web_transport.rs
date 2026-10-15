@@ -131,6 +131,7 @@ async fn handle_web_transport_chat(
             user.name_arc().clone(),
             WELCOME_MESSAGE,
             unread_summary,
+            chat_config.history.clone(),
         ))
         .await;
 

@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+use crate::config::ChatHistoryConfig;
 use crate::models::users::ChatUser;
 
 /// Messages sent from client to server
@@ -114,6 +115,7 @@ pub enum ServerMessage {
         name: Arc<str>, // User's display name
         message: String,
         unread: UnreadSummary, // All unread message counts
+        history: ChatHistoryConfig,
     },
 
     /// Message in a room
@@ -331,6 +333,8 @@ pub struct HistoryMessage {
     pub content: String,
     #[serde(with = "time::serde::timestamp")]
     pub timestamp: OffsetDateTime,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<MessageStatusType>,
 }
 
 impl ServerMessage {
@@ -342,6 +346,7 @@ impl ServerMessage {
         name: impl Into<Arc<str>>,
         message: impl Into<String>,
         unread: UnreadSummary,
+        history: ChatHistoryConfig,
     ) -> Self {
         Self::Welcome {
             connection_id,
@@ -350,6 +355,7 @@ impl ServerMessage {
             name: name.into(),
             message: message.into(),
             unread,
+            history,
         }
     }
 
@@ -359,6 +365,7 @@ impl ServerMessage {
         user: &ChatUser,
         message: impl Into<String>,
         unread: UnreadSummary,
+        history: ChatHistoryConfig,
     ) -> Self {
         Self::Welcome {
             connection_id,
@@ -367,6 +374,7 @@ impl ServerMessage {
             name: user.name_arc().clone(),
             message: message.into(),
             unread,
+            history,
         }
     }
 

@@ -103,6 +103,49 @@ Welcome and presence are control events; full host UIs should not render them
 as conversation text. `directHistory` and `unreadPrivate` expose the existing
 private-conversation protocol without changing authentication or transport.
 
+### History and long-lived clients
+
+Declare history policy in `chat.yaml`:
+
+```yaml
+history:
+  initial_limit: 50
+  page_limit: 50
+  max_limit: 100
+  max_messages_per_conversation: 500
+  max_conversations: 50
+```
+
+These values are also the compatibility defaults. Zero/negative requests are
+rejected, oversized requests are capped at `max_limit`, and `since` sync queries
+are bounded too. The initial/page sizes must fit the request cap and the browser
+message window; at least two conversation windows must fit. Welcome publishes
+the applied policy for every transport, without a second PHP/client declaration.
+Existing connections retain their announced browser limits; reconnect to adopt
+a changed policy. Server request caps use the current config snapshot.
+
+The Ops client requests no message history just for connecting: Welcome carries
+counts, then opening a conversation loads its recent window. Older history is
+explicitly paged. It keeps at most the configured messages per cached window and
+at most the configured number of cached conversation windows, evicting inactive
+windows first. Lightweight users, unread counters and unsent drafts are retained
+independently so evicting a message buffer does not lose unread state or input.
+Old pages can return to the latest window without reconnecting. Receipt-dedup
+sets are pruned with evicted messages. No database retention/deletion is implied.
+
+Private history includes persisted delivery/read status. Late `delivered` events
+cannot downgrade `read`. Reading one page does not clear all unread history:
+the client asks for the authoritative remaining count after submitting receipts.
+Only the private recipient may acknowledge a private message; room receipts must
+name the message's actual room. Visibility remains required before sending read
+receipts; merely receiving a WebSocket frame is not proof of reading it.
+
+Browser connection failures, including failures before the first successful
+handshake, use the existing configured reconnect backoff. Only one retry timer
+may be scheduled, and disconnect cancels it. A pending session/ticket bootstrap
+cannot reopen a socket after the owner disconnects. The isolated client test is
+`node --test client/tests/reconnect.mjs`; it uses fake timers and no network.
+
 ## Providers
 
 `ChatConfigProvider` owns `chat.yaml`. It loads once during boot,

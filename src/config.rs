@@ -15,7 +15,7 @@ use claviron::runtime::congif::{
 use claviron::runtime::registry::{Component, Reloadable, priority};
 use claviron::runtime::{AppState, Register};
 use claviron::tls::auth::verifier::PolicyConfig;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use crate::svc::rate_limit::ChatRateLimitConfig;
@@ -254,6 +254,10 @@ pub struct ChatConfig {
     #[serde(default)]
     pub presence: ChatPresenceConfig,
 
+    /// Bounded history delivery and browser working-set policy.
+    #[serde(default)]
+    pub history: ChatHistoryConfig,
+
     /// Metrics reporting configuration
     #[serde(default)]
     pub metrics: Option<MetricsConfig>,
@@ -293,6 +297,7 @@ impl ChatConfig {
     }
 
     fn validate(&self) -> Result<(), &'static str> {
+        self.history.validate()?;
         if self.auth.guard_enabled(ChatAuthGuard::Session) {
             if self.auth.enabled_guards().len() != 1 {
                 return Err(
@@ -346,8 +351,75 @@ impl Default for ChatConfig {
             allowed_origins: Vec::new(),
             rate_limit: ChatRateLimitConfig::default(),
             presence: ChatPresenceConfig::default(),
+            history: ChatHistoryConfig::default(),
             metrics: None,
         }
+    }
+}
+
+/// Published in Welcome so clients use the server's declared history policy.
+/// These limits never delete persistent messages.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ChatHistoryConfig {
+    pub initial_limit: u32,
+    pub page_limit: u32,
+    pub max_limit: u32,
+    pub max_messages_per_conversation: u32,
+    pub max_conversations: u32,
+}
+
+impl Default for ChatHistoryConfig {
+    fn default() -> Self {
+        Self {
+            initial_limit: 50,
+            page_limit: 50,
+            max_limit: 100,
+            max_messages_per_conversation: 500,
+            max_conversations: 50,
+        }
+    }
+}
+
+impl ChatHistoryConfig {
+    fn validate(&self) -> Result<(), &'static str> {
+        if self.initial_limit == 0
+            || self.page_limit == 0
+            || self.max_limit == 0
+        {
+            return Err("history limits must be greater than zero");
+        }
+        if self.initial_limit > self.max_limit
+            || self.page_limit > self.max_limit
+        {
+            return Err(
+                "history initial_limit and page_limit must not exceed max_limit",
+            );
+        }
+        if self.max_messages_per_conversation < self.initial_limit
+            || self.max_messages_per_conversation < self.page_limit
+        {
+            return Err(
+                "history max_messages_per_conversation must hold a history page",
+            );
+        }
+        if self.max_conversations < 2 {
+            return Err(
+                "history max_conversations must hold a room and a private conversation",
+            );
+        }
+        Ok(())
+    }
+
+    pub(crate) fn request_limit(
+        &self,
+        requested: Option<i64>,
+    ) -> Result<i64, &'static str> {
+        let requested = requested.unwrap_or(i64::from(self.initial_limit));
+        if requested <= 0 {
+            return Err("history limit must be greater than zero");
+        }
+        Ok(requested.min(i64::from(self.max_limit)))
     }
 }
 

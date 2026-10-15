@@ -1563,17 +1563,13 @@ impl ChatServer {
         let store =
             self.message_store.get().ok_or("Message store not available")?;
 
-        // Determine which query to use based on parameters
+        let limit = self.config_snapshot().history.request_limit(limit)?;
+        // Every query shape, including reconnect synchronization, is bounded.
         let messages = if let Some(since) = since {
-            // Sync mode: get all messages AFTER this timestamp
-            store.get_room_messages_since(room_name, since).await
+            store.get_room_messages_since(room_name, since, limit).await
         } else if let Some(before) = before {
-            // Pagination mode: get messages BEFORE this timestamp with limit
-            let limit = limit.unwrap_or(50).min(100);
             store.get_room_messages_before(room_name, before, limit).await
         } else {
-            // Default: get recent messages with limit
-            let limit = limit.unwrap_or(50).min(100);
             store.get_recent_room_messages(room_name, limit).await
         }
         .map_err(|e| format!("Database error: {}", e))?;
@@ -1611,6 +1607,7 @@ impl ChatServer {
                         from_uuid,
                         content: msg.content,
                         timestamp: msg.created_at,
+                        status: None,
                     }
                 })
             })
@@ -1635,13 +1632,17 @@ impl ChatServer {
         let store =
             self.message_store.get().ok_or("Message store not available")?;
 
-        // Determine which query to use based on parameters
+        let limit = self.config_snapshot().history.request_limit(limit)?;
         let messages = if let Some(since) = since {
             store
-                .get_private_messages_since(from_user_id, with_user_id, since)
+                .get_private_messages_since(
+                    from_user_id,
+                    with_user_id,
+                    since,
+                    limit,
+                )
                 .await
         } else if let Some(before) = before {
-            let limit = limit.unwrap_or(50).min(100);
             store
                 .get_private_messages_before(
                     from_user_id,
@@ -1651,7 +1652,6 @@ impl ChatServer {
                 )
                 .await
         } else {
-            let limit = limit.unwrap_or(50).min(100);
             store
                 .get_recent_private_messages(from_user_id, with_user_id, limit)
                 .await
@@ -1688,6 +1688,13 @@ impl ChatServer {
                         from_uuid,
                         content: msg.content,
                         timestamp: msg.created_at,
+                        status: Some(if msg.read_at.is_some() {
+                            MessageStatusType::Read
+                        } else if msg.delivered_at.is_some() {
+                            MessageStatusType::Delivered
+                        } else {
+                            MessageStatusType::Sent
+                        }),
                     }
                 })
             })
@@ -1720,6 +1727,12 @@ impl ChatServer {
             if let Ok(Some(private_msg)) =
                 message_store.get_private_message_by_uuid(message_uuid).await
             {
+                if private_msg.to_user_id != user_id {
+                    return Err(
+                        "Only the private message recipient can acknowledge it"
+                            .to_string(),
+                    );
+                }
                 // Mark private message as delivered
                 let actually_updated = message_store
                     .mark_private_message_delivered(message_uuid)
@@ -1764,6 +1777,11 @@ impl ChatServer {
         if let Ok(Some(room_msg)) =
             message_store.get_room_message_by_uuid(message_uuid).await
         {
+            if room != Some(room_msg.room.as_str()) {
+                return Err(
+                    "Message does not belong to the requested room".to_string()
+                );
+            }
             let receipt_store = self
                 .receipt_store
                 .get()
@@ -1834,6 +1852,12 @@ impl ChatServer {
             if let Ok(Some(private_msg)) =
                 message_store.get_private_message_by_uuid(message_uuid).await
             {
+                if private_msg.to_user_id != user_id {
+                    return Err(
+                        "Only the private message recipient can acknowledge it"
+                            .to_string(),
+                    );
+                }
                 // Mark private message as read
                 let actually_updated = message_store
                     .mark_private_message_read(message_uuid)
@@ -1875,6 +1899,11 @@ impl ChatServer {
         if let Ok(Some(room_msg)) =
             message_store.get_room_message_by_uuid(message_uuid).await
         {
+            if room != Some(room_msg.room.as_str()) {
+                return Err(
+                    "Message does not belong to the requested room".to_string()
+                );
+            }
             let receipt_store = self
                 .receipt_store
                 .get()

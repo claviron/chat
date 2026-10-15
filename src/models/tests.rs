@@ -62,7 +62,7 @@ async fn runtime_queries_preserve_chat_storage_contracts()
         room_id
     );
     assert_eq!(
-        messages.get_room_messages_since("wallet", since).await?[0].uuid,
+        messages.get_room_messages_since("wallet", since, 50).await?[0].uuid,
         room_id
     );
     assert_eq!(
@@ -127,7 +127,7 @@ async fn runtime_queries_preserve_chat_storage_contracts()
     assert!(messages.get_private_message_by_uuid(&missing_id).await?.is_none());
     assert_eq!(messages.get_recent_private_messages(1, 2, 10).await?.len(), 2);
     assert_eq!(
-        messages.get_private_messages_since(1, 2, since).await?.len(),
+        messages.get_private_messages_since(1, 2, since, 50).await?.len(),
         2
     );
     assert_eq!(
