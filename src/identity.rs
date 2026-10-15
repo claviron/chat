@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use claviron::auth::Authenticated;
+use claviron::auth::{AnyAuthenticated, Authenticated, UserProviderError};
 use thiserror::Error;
 
 /// Application-owned session admission for same-origin chat transports.
@@ -13,6 +13,18 @@ pub trait SessionAuthenticator: Send + Sync + 'static {
         vhost: &str,
         headers: &http::HeaderMap,
     ) -> Result<claviron::auth::orbit::AuthenticatedSession, http::StatusCode>;
+}
+
+/// Optional application-owned contacts, including users who are offline.
+///
+/// Bind this capability only when every admitted chat client may discover the
+/// returned users. It grants neither transport admission nor room membership;
+/// chat derives presence itself and reuses the existing user/avatar projection.
+#[async_trait]
+pub trait UserDirectory: Send + Sync + 'static {
+    async fn list_users(
+        &self
+    ) -> Result<Vec<AnyAuthenticated>, UserProviderError>;
 }
 
 /// Failure returned by an application-owned avatar URL resolver.

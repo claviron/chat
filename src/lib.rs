@@ -14,6 +14,8 @@ pub mod types;
 pub use bootstrap::register;
 pub use error::{Error, Result};
 pub(crate) use handler::handle_client_message;
-pub use identity::{AvatarUrlError, AvatarUrlProvider, SessionAuthenticator};
+pub use identity::{
+    AvatarUrlError, AvatarUrlProvider, SessionAuthenticator, UserDirectory,
+};
 pub use types::client::ChatClient;
 pub use types::server::ChatServer;

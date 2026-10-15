@@ -35,7 +35,9 @@ use crate::types::messages::{
     UserInfo,
 };
 use crate::types::room::ChatRoom;
-use crate::{AvatarUrlProvider, ChatClient, SessionAuthenticator};
+use crate::{
+    AvatarUrlProvider, ChatClient, SessionAuthenticator, UserDirectory,
+};
 
 /// Global svc server state.
 ///
@@ -91,6 +93,9 @@ pub struct ChatServer {
     /// Optional application-owned avatar URL projection.
     avatars: Arc<OnceLock<Option<Arc<dyn AvatarUrlProvider>>>>,
 
+    /// Optional contacts; this never owns authentication or presence.
+    directory: Arc<OnceLock<Option<Arc<dyn UserDirectory>>>>,
+
     /// Fleet-replicated remote presence. Local transport handles remain in
     /// `clients`, `user_connections`, and `rooms` above.
     presence: PresenceRegistry,
@@ -115,6 +120,7 @@ impl ChatServer {
             auth: Arc::default(),
             session_auth: Arc::default(),
             avatars: Arc::default(),
+            directory: Arc::default(),
             presence: PresenceRegistry::new(),
         }
     }
@@ -1298,11 +1304,47 @@ impl ChatServer {
         rooms
     }
 
-    /// List users in a room (deduplicated by user_id for multi-device support)
+    /// List application contacts when opted in, otherwise connected room users.
+    /// Directory membership is presentation only, not room membership/admission.
     pub async fn list_users(
         &self,
         room_name: &str,
     ) -> Result<Vec<UserInfo>, String> {
+        if let Some(directory) = self.directory.get().and_then(Option::as_deref)
+        {
+            let mut contacts = HashMap::new();
+            for user in directory
+                .list_users()
+                .await
+                .map_err(|error| error.to_string())?
+            {
+                let user =
+                    ChatUser::from_authenticated(user, self.avatars()).await?;
+                contacts.insert(user.id(), user);
+            }
+            let mut online: HashSet<i32> = self
+                .clients
+                .read()
+                .await
+                .values()
+                .map(ChatClient::user_id)
+                .collect();
+            online.extend(
+                self.presence
+                    .remote_user_ids(
+                        self.config_snapshot().presence.stale_after,
+                    )
+                    .await,
+            );
+            let mut users = contacts
+                .into_values()
+                .map(|user| {
+                    UserInfo::from((&user, online.contains(&user.id())))
+                })
+                .collect::<Vec<_>>();
+            users.sort_by(|left, right| left.username.cmp(&right.username));
+            return Ok(users);
+        }
         let users = self.fleet_room_users(room_name).await?;
         let mut user_infos = users
             .iter()
@@ -2016,6 +2058,7 @@ impl Component<AppState> for ChatServer {
             .after::<Arc<dyn UserProvider>>()
             .after::<Arc<dyn SessionAuthenticator>>()
             .after::<Arc<dyn AvatarUrlProvider>>()
+            .after::<Arc<dyn UserDirectory>>()
     }
 
     fn as_bootable(&self) -> Option<&dyn Bootable<AppState, Self::Deps>> {
@@ -2140,8 +2183,10 @@ impl Bootable<AppState, <Self as Component<AppState>>::Deps> for ChatServer {
         }
         let avatars =
             state.registry_ref().resolve_dyn::<dyn AvatarUrlProvider>();
+        let directory = state.registry_ref().resolve_dyn::<dyn UserDirectory>();
         let _ = self.users.set(users);
         let _ = self.avatars.set(avatars);
+        let _ = self.directory.set(directory);
 
         let db = db.ok_or_else(|| {
             RegistryError::msg("ChatServer boot: DbService not registered")
@@ -2171,3 +2216,7 @@ impl Bootable<AppState, <Self as Component<AppState>>::Deps> for ChatServer {
 #[cfg(test)]
 #[path = "../../tests/user_provider_order.rs"]
 mod user_provider_order_tests;
+
+#[cfg(test)]
+#[path = "../../tests/user_directory.rs"]
+mod user_directory_tests;

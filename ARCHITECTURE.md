@@ -209,6 +209,23 @@ existing interface's preparation target. SessionAuthenticator and
 AvatarUrlProvider use the same ordering convention, allowing host-owned
 capabilities to become ready without chat naming any application service.
 
+The optional chat-owned `UserDirectory` capability supplies discoverable contacts,
+including users who have never connected. Bind it as `dyn UserDirectory`; an
+owner preparing it during boot orders before `Arc<dyn UserDirectory>`, and chat
+orders after that target. Core auth's `UserProvider` remains an identity lookup,
+not an enumeration API. Directory entries reuse the existing authenticated-user
+and avatar projection; no private model attributes are sent to clients.
+
+With a directory, the existing `list_users` / `UserList` response contains these
+contacts, deduplicated and sorted by username. Chat derives each `online` flag
+from local connections plus unexpired remote fleet presence, independently of
+the requested room. Without a directory, the response remains the connected room
+members only. Room membership, delivery/receipt recipients, session admission and
+online/offline events are unchanged. The host must return only contacts every
+admitted client may discover. The directory is queried on list requests, not per
+message or on a new background timer. An empty result stays empty; provider
+failures are reported instead of falling back to a different contact list.
+
 Chat also defines the optional `AvatarUrlProvider`. The downstream application
 owns avatar storage, hash/MIME interpretation, CDN selection, and URL policy;
 chat asks only for the final URL while constructing a `ChatUser` snapshot. A
