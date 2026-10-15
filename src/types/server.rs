@@ -1206,18 +1206,16 @@ impl ChatServer {
         let _from_client =
             self.get_client(from_user_id).await.ok_or("Sender not found")?;
 
-        // Save to database as private message
-        if let Some(store) = self.message_store.get() {
-            if let Err(e) = store
-                .save_private_message(&uuid, from_user_id, to_user_id, &content)
-                .await
-            {
-                error!(error = %e, dm_to = to_user_id, "Failed to save private message to database");
-                return Err("Failed to save private message".to_string());
-            } else {
-                debug!(dm_to = to_user_id, "Private message saved to database");
-            }
+        let store =
+            self.message_store.get().ok_or("Message store not available")?;
+        if let Err(e) = store
+            .save_private_message(&uuid, from_user_id, to_user_id, &content)
+            .await
+        {
+            error!(error = %e, dm_to = to_user_id, "Failed to save private message to database");
+            return Err("Failed to save private message".to_string());
         }
+        debug!(dm_to = to_user_id, "Private message saved to database");
 
         self.emit_delivery(ChatDeliveryEvent::DirectMessage {
             uuid,
@@ -2089,8 +2087,8 @@ impl Scoped for ChatServer {
 }
 
 /// The owned work: the delivery and presence listeners and the presence
-/// refresh, started when the process runs and ended with it. `enabled: false`
-/// runs nothing.
+/// refresh, started when the process runs and ended with it. No declared
+/// ingress means no serving work.
 #[async_trait]
 impl Runnable<AppState, <Self as Component<AppState>>::Deps> for ChatServer {
     async fn run(
@@ -2099,7 +2097,7 @@ impl Runnable<AppState, <Self as Component<AppState>>::Deps> for ChatServer {
         state: AppState,
         context: RunContext,
     ) -> claviron::runtime::registry::Result<()> {
-        if !self.config_snapshot().enabled {
+        if !self.config_snapshot().has_ingress() {
             return Ok(());
         }
         self.start_delivery_listener(state.clone());
@@ -2146,7 +2144,7 @@ impl Bootable<AppState, <Self as Component<AppState>>::Deps> for ChatServer {
         );
         self.rate_limiter.store(Some(Arc::new(new_rate_limiter)));
 
-        if !cfg.enabled {
+        if !cfg.has_ingress() {
             return Ok(());
         }
 
@@ -2159,8 +2157,9 @@ impl Bootable<AppState, <Self as Component<AppState>>::Deps> for ChatServer {
                 RegistryError::msg("ChatServer boot: UserProvider not bound")
             })?;
         let auth = state.registry_ref().resolve_dyn::<dyn TokenAuthenticator>();
-        if cfg.auth.guard_enabled(crate::config::ChatAuthGuard::Orbit)
-            && auth.is_none()
+        if cfg.embed.as_ref().is_some_and(|embed| {
+            embed.auth.guard_enabled(crate::config::ChatAuthGuard::Orbit)
+        }) && auth.is_none()
         {
             return Err(RegistryError::msg(
                 "ChatServer boot: Orbit TokenAuthenticator not bound",
@@ -2171,8 +2170,9 @@ impl Bootable<AppState, <Self as Component<AppState>>::Deps> for ChatServer {
         }
         let session_auth =
             state.registry_ref().resolve_dyn::<dyn SessionAuthenticator>();
-        if cfg.auth.guard_enabled(crate::config::ChatAuthGuard::Session)
-            && session_auth.is_none()
+        if cfg.embed.as_ref().is_some_and(|embed| {
+            embed.auth.guard_enabled(crate::config::ChatAuthGuard::Session)
+        }) && session_auth.is_none()
         {
             return Err(RegistryError::msg(
                 "ChatServer boot: SessionAuthenticator not bound",

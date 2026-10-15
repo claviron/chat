@@ -31,6 +31,8 @@ pub(crate) async fn handle_websocket(
         .resolve::<ChatServer>()
         .ok_or("ChatServer not registered")?;
     let chat_config = server.config_snapshot();
+    let embed =
+        chat_config.embed.as_ref().ok_or("chat embed is not configured")?;
 
     debug!(
         username = %user.username(),
@@ -92,8 +94,8 @@ pub(crate) async fn handle_websocket(
     }
 
     // Setup ping timer
-    let ping_interval_duration = chat_config.ping_interval;
-    let idle_timeout = chat_config.idle_timeout;
+    let ping_interval_duration = embed.ping_interval;
+    let idle_timeout = embed.idle_timeout;
 
     let mut ping_timer = interval(ping_interval_duration);
     ping_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

@@ -5,51 +5,32 @@ use claviron::runtime::registry::Error;
 use claviron::runtime::{AppState, RunContext};
 use claviron::ssl::parsers::take_first_cert_from_der;
 use claviron::sys::net::{PortSharing, create_udp_socket};
-use claviron::tls::auth::create_auth_config;
 use quinn::crypto::rustls::QuicServerConfig;
 use quinn::{Endpoint, ServerConfig, TransportConfig};
 use tracing::{debug, info, trace, warn};
 
 use crate::config::ChatConfig;
-use crate::svc::quic::ALPN;
 use crate::svc::quic::session::handle_quic_chat_stream;
-use crate::svc::shared::{derive_chat_resolver, validate_idle_timeout};
+use crate::svc::shared::{prepare_chat_tls, validate_idle_timeout};
 
 pub(crate) async fn start_quic_service(
     state: AppState,
     cfg: ChatConfig,
     context: RunContext,
 ) -> claviron::runtime::registry::Result<()> {
-    if !cfg.enabled {
-        info!("Chat service disabled in config");
-        return Ok(());
-    }
-
     // Chat over Quic transport is starting
 
-    let Some(quic_cfg) = cfg.quic_cfg() else {
-        warn!("Raw QUIC config for chat service is not configured/enabled");
+    let Some(quic_cfg) = cfg.quic_cfg().and_then(|quic| quic.listener.as_ref())
+    else {
         return Ok(());
     };
     let tls_timeout = quic_cfg.handshake_timeout;
     let transport_cfg = &quic_cfg.transport;
 
-    let chat_resolver = derive_chat_resolver(&state, &quic_cfg.hosts)?;
+    let tls_config = prepare_chat_tls(&state, &quic_cfg.hosts)?;
+    let cert_names = &quic_cfg.hosts;
 
-    let cert_names = chat_resolver.hostnames();
-
-    let ca_path = cfg.ca_path().ok_or_else(|| {
-        Error::msg("CA Path for Quic Chat Service is missing")
-    })?;
-
-    let tls_config = create_auth_config(
-        ca_path,
-        chat_resolver,
-        vec![ALPN.to_vec()],
-        cfg.policy_cfg(),
-    )?;
-
-    let addr = cfg.address;
+    let addr = quic_cfg.listen;
 
     let quic = QuicServerConfig::try_from(Arc::new(tls_config))
         .map_err(|e| Error::msg(format!("Quic Setup Error {}", e)))?;
@@ -57,8 +38,7 @@ pub(crate) async fn start_quic_service(
     trace!("Raw chat QUIC loading Quinn configuration");
     let mut server_cfg = ServerConfig::with_crypto(Arc::new(quic));
 
-    // Configure QUIC transport keep-alive and idle timeout using chat config.
-    // We reuse WebSocket ping settings for QUIC too.
+    // Raw QUIC has its own connection policy, independent of WebSocket pings.
 
     // Validate: require keep_alive_interval and enforce relation with idle_timeout
     let keep_alive = transport_cfg.keep_alive_interval.ok_or_else(|| {
@@ -136,6 +116,10 @@ pub(crate) async fn start_quic_service(
                 let Some(connecting) = maybe_conn else {
                     break; // endpoint was closed
                 };
+                if quic_cfg.acl.as_ref().is_some_and(|acl| !acl.is_allowed(connecting.remote_address().ip())) {
+                    connecting.refuse();
+                    continue;
+                }
 
                 let state = state_clone.clone();
                 let handle = handle.clone();

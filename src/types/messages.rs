@@ -244,11 +244,11 @@ pub enum ServerMessage {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageStatusType {
-    /// Server confirmed receipt and broadcast
+    /// Server accepted and persisted the message
     Sent,
-    /// Message delivered to recipient's connection (future)
+    /// A recipient acknowledged receiving the message
     Delivered,
-    /// Message read by recipient (future)
+    /// A recipient acknowledged reading the message
     Read,
     /// Message failed to send
     Failed,

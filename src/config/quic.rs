@@ -1,5 +1,6 @@
 //! Raw chat QUIC is not HTTP/3. Reuse transport knobs, not an HTTP listener.
 
+use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::time::Duration;
 
@@ -8,14 +9,30 @@ use claviron::helpers::de::{
     deserialize_duration, deserialize_optional_duration, one_or_many,
 };
 use claviron::http::config::QuicConfig;
+use claviron::http::config::acl::AccessLimiter;
+use claviron::orbit::placement::{Dispatch, DispatchPolicy, Scope};
 use serde::Deserialize;
+
+#[derive(Clone, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ChatQuicConfig {
+    /// No listener declaration means no raw QUIC socket or runnable admission.
+    pub listener: Option<ChatQuicListenerConfig>,
+}
 
 #[derive(Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ChatQuicConfig {
+pub(crate) struct ChatQuicListenerConfig {
+    pub listen: SocketAddr,
     /// Actual TLS hostnames for raw QUIC, not edge vhost keys.
     #[serde(deserialize_with = "one_or_many", alias = "host")]
     pub hosts: Vec<Host>,
+    #[serde(default)]
+    pub scope: Scope,
+    #[serde(default)]
+    pub dispatch: Dispatch,
+    pub dispatch_policy: Option<DispatchPolicy>,
+    pub acl: Option<AccessLimiter>,
     #[serde(default)]
     pub max_connections: Option<NonZeroUsize>,
     #[serde(default, deserialize_with = "deserialize_optional_duration")]
@@ -40,18 +57,46 @@ fn default_handshake_timeout() -> Duration {
 
 impl ChatQuicConfig {
     pub fn validate(&self) -> Result<(), &'static str> {
+        if let Some(listener) = &self.listener {
+            listener.validate()?;
+        }
+        Ok(())
+    }
+}
+
+impl ChatQuicListenerConfig {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.listen.port() == 0 {
+            return Err("quic.listener.listen requires a nonzero UDP port");
+        }
+        if self.scope != Scope::Worker {
+            return Err(
+                "quic.listener.scope must be workers; chat fanout runs in workers",
+            );
+        }
+        self.dispatch.validate_policy(self.dispatch_policy).map_err(|_| {
+            "quic.listener dispatch one/pool requires a valid dispatch_policy"
+        })?;
         if self.hosts.is_empty() {
-            return Err("quic.hosts requires concrete TLS hostnames");
+            return Err("quic.listener.hosts requires concrete TLS hostnames");
+        }
+        for host in &self.hosts {
+            let name = host.to_string();
+            if host.is_ip() || name.contains(['*', ':']) {
+                return Err(
+                    "quic.listener.hosts requires DNS hostnames without wildcards or ports",
+                );
+            }
         }
         if self.acquire_timeout.is_zero() || self.handshake_timeout.is_zero() {
             return Err(
-                "quic admission and handshake timeouts must be positive",
+                "quic.listener admission and handshake timeouts must be positive",
             );
         }
         if self.transport.max_concurrent_bidi_streams == 0
             || self.transport.max_concurrent_uni_streams == 0
         {
-            return Err("quic stream limits must be positive");
+            return Err("quic.listener stream limits must be positive");
         }
         if self.transport.keep_alive_interval.is_none_or(|keep_alive| {
             keep_alive.is_zero() || keep_alive >= self.transport.idle_timeout
@@ -70,48 +115,5 @@ impl ChatQuicConfig {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn separates_listener_limits_from_quic_and_preserves_indefinite_grace() {
-        let config: ChatQuicConfig = serde_yaml::from_str("hosts: [chat.example.test]\nmax_connections: 10\ngraceful_timeout: null\nhandshake_timeout: 2s\ntransport: {keep_alive_interval: 10s, idle_timeout: 60s}").unwrap();
-        assert_eq!(config.max_connections.unwrap().get(), 10);
-        assert_eq!(config.handshake_timeout, Duration::from_secs(2));
-        assert_eq!(config.graceful_timeout, None);
-        assert!(config.validate().is_ok());
-    }
-
-    #[test]
-    fn rejects_http_fields_flat_transport_keys_and_invalid_limits() {
-        for yaml in [
-            "max_request_body_size: 1024",
-            "listen: '127.0.0.1:443'",
-            "max_connections: 0",
-            "keep_alive_interval: 10s",
-            "transport: {bogus: true}",
-        ] {
-            assert!(
-                serde_yaml::from_str::<ChatQuicConfig>(&format!(
-                    "hosts: [chat.example.test]\n{yaml}"
-                ))
-                .is_err(),
-                "{yaml}"
-            );
-        }
-        for yaml in [
-            "transport: {keep_alive_interval: 0s}",
-            "transport: {keep_alive_interval: 60s, idle_timeout: 60s}",
-            "transport: {keep_alive_interval: 10s, enable_early_data: true}",
-        ] {
-            assert!(
-                serde_yaml::from_str::<ChatQuicConfig>(&format!(
-                    "hosts: [chat.example.test]\n{yaml}"
-                ))
-                .unwrap()
-                .validate()
-                .is_err()
-            );
-        }
-    }
-}
+#[path = "../../tests/quic_config.rs"]
+mod tests;

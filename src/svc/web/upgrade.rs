@@ -13,7 +13,7 @@ use session::handle_websocket;
 use tracing::warn;
 
 use super::session;
-use crate::config::{ChatAuthGuard, ChatConfigProvider};
+use crate::config::{ChatAuthGuard, ChatConfigProvider, ChatEmbedConfig};
 use crate::svc::web::auth::{
     extract_session_user, extract_user_from_protocol, websocket_guard_name,
 };
@@ -28,12 +28,13 @@ impl ChatWsUpgradeHandler {
         Self { config_provider }
     }
 
-    fn origin_validator(&self) -> Option<Arc<OriginValidator>> {
-        let cfg = self.config_provider.current();
-        if cfg.allowed_origins.is_empty() {
+    fn origin_validator(
+        embed: &ChatEmbedConfig
+    ) -> Option<Arc<OriginValidator>> {
+        if embed.allowed_origins.is_empty() {
             return None;
         }
-        Some(Arc::new(OriginValidator::new(&cfg.allowed_origins)))
+        Some(Arc::new(OriginValidator::new(&embed.allowed_origins)))
     }
 
     async fn authenticate(
@@ -46,12 +47,15 @@ impl ChatWsUpgradeHandler {
         H1UpgradeReject,
     > {
         let cfg = self.config_provider.current();
-        if cfg.auth.guard_enabled(ChatAuthGuard::Session) {
+        let embed = cfg.embed.as_ref().ok_or_else(|| {
+            H1UpgradeReject::service_unavailable("chat embed is not configured")
+        })?;
+        if embed.auth.guard_enabled(ChatAuthGuard::Session) {
             let user = extract_session_user(
                 state,
                 host.to_cow_str().as_ref(),
                 headers,
-                &cfg,
+                embed,
             )
             .await
             .map_err(|status| match status {
@@ -67,16 +71,16 @@ impl ChatWsUpgradeHandler {
             })?;
             return Ok((user, None));
         }
-        validate_origin(headers, self.origin_validator().as_deref())?;
+        validate_origin(headers, Self::origin_validator(embed).as_deref())?;
         let protocol = extract_protocol_from_headers(headers)?;
         let requested_guard = websocket_guard_name(&protocol);
-        extract_user_from_protocol(protocol, state, &cfg.auth)
+        extract_user_from_protocol(protocol, state, &embed.auth)
             .await
             .map(|(user, protocol)| (user, Some(protocol)))
             .map_err(|err| {
                 warn!(requested_guard,
-                    enabled_guards = ?cfg.auth.enabled_guards(),
-                    default_guard = ?cfg.auth.default_guard,
+                    enabled_guards = ?embed.auth.enabled_guards(),
+                    default_guard = ?embed.auth.default_guard,
                     reason = %err, "WebSocket authentication rejected");
                 H1UpgradeReject::unauthorized("chat credential rejected")
             })

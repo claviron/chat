@@ -95,11 +95,7 @@ impl Routable for ChatWebService {
             return false;
         };
         let cfg = cfg_provider.current();
-        if !cfg.enabled {
-            return false;
-        }
-
-        cfg.vhosts().contains(key)
+        cfg.embed.as_ref().is_some_and(|embed| embed.vhosts.contains(key))
     }
 
     fn h1_upgrades(
@@ -109,7 +105,10 @@ impl Routable for ChatWebService {
     ) -> claviron::runtime::registry::Result<Vec<H1UpgradeRoute>> {
         let cfg_provider = self.config_provider()?.clone();
         let cfg = cfg_provider.current();
-        let path = cfg.websocket_route_path();
+        let Some(embed) = &cfg.embed else {
+            return Ok(Vec::new());
+        };
+        let path = embed.websocket_route_path();
         Ok(vec![H1UpgradeRoute::handler(
             path,
             Arc::new(ChatWsUpgradeHandler::new(cfg_provider)),
@@ -133,14 +132,15 @@ impl Bootable<AppState, <Self as Component<AppState>>::Deps>
         #[cfg(feature = "webtransport")]
         let (cfg_provider, h2, webtransport) = deps;
         let cfg = cfg_provider.current();
-        if cfg.enabled
-            && let Some(registry) = h2
-        {
-            let path = cfg.h2_connect_route_path();
-            for host in cfg.vhosts() {
+        let Some(embed) = &cfg.embed else {
+            return Ok(());
+        };
+        if let Some(registry) = h2 {
+            let path = embed.h2_connect_route_path();
+            for host in &embed.vhosts {
                 registry.register_handler_for_host(
                     &host.to_string(),
-                    cfg.websocket_route_path(),
+                    embed.websocket_route_path(),
                     Arc::new(ChatWsUpgradeHandler::new(cfg_provider.clone())),
                 )?;
                 if let Err(err) = registry.register_handler_for_host(
@@ -156,11 +156,9 @@ impl Bootable<AppState, <Self as Component<AppState>>::Deps>
             }
         }
         #[cfg(feature = "webtransport")]
-        if cfg.enabled
-            && let Some(registry) = webtransport
-        {
-            let path = cfg.web_transport_route_path();
-            for host in cfg.vhosts() {
+        if let Some(registry) = webtransport {
+            let path = embed.web_transport_route_path();
+            for host in &embed.vhosts {
                 if let Err(err) = registry.register_handler_for_host(
                     &host.to_string(),
                     path.clone(),

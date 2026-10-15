@@ -29,7 +29,7 @@ webtransport = [
 metrics = []
 
 [dependencies]
-claviron = { version = "0.2.0-alpha.16", registry = "de02", path = "../claviron", default-features = false, features = [
+claviron = { path = "../claviron", default-features = false, features = [
     "auth",
     "server",
     "edge",

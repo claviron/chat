@@ -19,7 +19,7 @@ pub(crate) async fn extract_session_user(
     state: &AppState,
     vhost: &str,
     headers: &http::HeaderMap,
-    config: &crate::config::ChatConfig,
+    config: &crate::config::ChatEmbedConfig,
 ) -> Result<ChatAuthentication, http::StatusCode> {
     let origin =
         headers.get(http::header::ORIGIN).and_then(|value| value.to_str().ok());

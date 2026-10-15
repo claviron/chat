@@ -104,7 +104,13 @@ pub(crate) async fn handle_client_message(
                             .await
                         {
                             Ok(_) => {
-                                // Client already shows optimistic UI, no need to send "Sent" status
+                                // Persistence succeeded; distinguish acceptance from delivery.
+                                let _ = client
+                                    .send(ServerMessage::message_status(
+                                        uuid,
+                                        MessageStatusType::Sent,
+                                    ))
+                                    .await;
                                 Ok(String::new())
                             }
                             Err(e) => {

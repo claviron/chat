@@ -140,6 +140,15 @@ Only the private recipient may acknowledge a private message; room receipts must
 name the message's actual room. Visibility remains required before sending read
 receipts; merely receiving a WebSocket frame is not proof of reading it.
 
+Successful private sends explicitly acknowledge `message_status.sent` to the
+originating connection after persistence; unavailable storage is a failure,
+not a successful send. The UI can distinguish pending sends from server
+acceptance. Recipient acknowledgement, not queueing a frame, means delivered;
+the recipient's visible-conversation acknowledgement means read. Room read
+events already include `read_by` UUIDs and usernames. Clients may show compact
+reader avatars without interpreting one room receipt as delivery/read by all
+members. Room history does not currently hydrate historical reader lists.
+
 Browser connection failures, including failures before the first successful
 handshake, use the existing configured reconnect backoff. Only one retry timer
 may be scheduled, and disconnect cancels it. A pending session/ticket bootstrap
@@ -178,20 +187,61 @@ the vhost resolver. `host`/`hosts` are not aliases for this selector, and web
 bindings compare only canonical keys when the edge snapshot is prepared.
 
 `ChatQuicService` remains a `Provider + Runnable` wrapper for the raw
-QUIC demo/prototype transport. It is not registered on master. In
-standalone it runs in the single process; in worker mode every worker may
-run it. Its UDP socket is opened through `claviron-sys` reuse-port
+QUIC demo/prototype transport. Registration alone does not start a listener:
+both `enabled: true` and `quic.listener` are required. Without a listener,
+manual start/restart is unavailable too. In standalone it runs in the single
+process; in worker mode its own scope/dispatch selects serving executions.
+Worker scope is required because chat fanout/presence are worker-owned.
+Its UDP socket is opened through `claviron-sys` reuse-port
 helpers so the kernel can distribute QUIC flows across workers. Its listener,
 connection tasks, and stream gate belong to one `RunContext` generation:
 stopping that generation closes admission, lets accepted sessions drain under
 the configured grace policy, and waits for the owned connection tasks.
 
-Its `quic` block is a chat-owned `ChatQuicConfig`: admission/grace/handshake
-fields are separate from nested `transport: QuicConfig`. It no longer consumes
-the removed HTTP/3 server config or accepts HTTP body/listen fields. Address
-remains `chat.address`. Stream limits are positive, null grace is indefinite,
-and raw mTLS chat rejects early data. Vhost WebTransport remains bound to the
-core named H3 listener and does not use this raw-QUIC configuration.
+The `quic` block is raw QUIC, not HTTP/3. Its optional `listener` owns bind,
+concrete TLS server names, scope/dispatch, optional IP ACL and
+admission/grace/handshake limits. QUIC transport settings remain nested under
+`listener.transport`. Root `address` is no longer accepted: use `listener.listen`.
+Server certificates come from the shared TLS resolver; the client CA and
+organization/unit constraints come from the selected hostnames' existing TLS
+policies. No `ca_path` or `policy` copy is accepted in chat configuration.
+Every selected hostname must require mTLS. All names on one raw QUIC listener
+must share the same client CA and subject constraints because its Quinn endpoint
+has one client verifier; differing policies fail instead of merging trust roots.
+
+```yaml
+quic:
+  listener:
+    listen: '127.0.0.1:9030'
+    hosts: [chat.example.test]
+    scope: workers
+    dispatch: each
+    max_connections: 100
+    graceful_timeout: null
+    acquire_timeout: 100ms
+    handshake_timeout: 5s
+    transport:
+      keep_alive_interval: 10s
+      idle_timeout: 60s
+```
+
+Choose deployment addresses, limits and times explicitly. `dispatch: one` or
+`pool` additionally requires a valid `dispatch_policy` with capacity,
+lease_ttl and renewal_interval; no Orbit YAML entry is needed. Optional `acl`
+uses the existing AccessLimiter declaration and rejects disallowed remote IPs
+before the QUIC handshake. No HTTP headers or cookie guard are involved. The
+`hosts` entries select TLS server-name policies, not web application routing.
+Validation rejects overlapping UDP binds with configured edge QUIC/H3 listeners,
+even while those listeners are stopped; raw QUIC and H3 cannot share reuseport.
+TCP on the same port is independent. Reuseport remains available between
+executions of this raw QUIC service itself.
+
+Stream limits are positive, null grace is indefinite, and raw mTLS chat rejects
+early data. Vhost WebTransport remains bound to the core named H3 listener and
+does not use this raw-QUIC configuration. Listener changes require the normal
+service/process restart to replace the endpoint; config reload does not rebind
+an active socket. The embedding binary must enable the chat `quic` feature;
+declaring a listener without that feature is a validation error.
 
 ## Authentication Boundary
 
@@ -327,9 +377,11 @@ cookie assumptions. A same-origin session deployment does not need this issuer.
 Chat has no selected-worker run gate anymore:
 
 - `enabled: false` means the runnable returns immediately.
-- master does not register raw QUIC chat.
+- registration alone grants no raw QUIC listener; `quic.listener` opts in.
+- master does not run raw QUIC chat; serving and fanout require worker scope.
 - standalone runs raw QUIC in the single process.
-- workers may all run raw QUIC and own only their accepted local clients.
+- eligible workers follow the listener's own dispatch selection and own only
+  their accepted local clients.
 
 Vhost WebSocket, H2 CONNECT, WebTransport, and raw QUIC all follow the
 same ownership rule: accepted requests/connections may land on any
@@ -427,12 +479,13 @@ transport adapters enter through normal vhost routing and never own
 global chat state.
 
 The raw QUIC transport still derives a per-chat certificate resolver
-from the shared TLS resolver. `quic.hosts` (or singular `quic.host`) contains
+from the shared TLS resolver. `quic.listener.hosts` (or singular `host`) contains
 the actual TLS hostnames independently of `vhosts`; a symbolic key must not be
-used as an implicit SNI name. If none of the configured `quic.hosts` exist in
-the shared resolver, TLS returns an error such as “No hostname found in
-shared host”. For chat, that is a recoverable configuration problem, not
-a process-fatal condition.
+used as an implicit SNI name. Every selected hostname must have a loaded
+certificate and a required client-auth policy with a configured CA. The existing
+CA and organization/unit checks are reused; chat does not define another TLS
+trust source. For chat, a missing TLS dependency is a recoverable configuration
+problem, not a process-fatal condition.
 
 ## Lifecycle
 

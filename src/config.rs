@@ -1,20 +1,15 @@
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
-use claviron::edge::Host;
-use claviron::helpers::de::{
-    deserialize_bind_address, deserialize_duration, one_or_many,
-};
+use claviron::helpers::de::deserialize_duration;
 use claviron::runtime::congif::{
     self, ConfigFile, ConfigObserver, Configurable,
 };
 use claviron::runtime::registry::{Component, Reloadable, priority};
 use claviron::runtime::{AppState, Register};
-use claviron::tls::auth::verifier::PolicyConfig;
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
@@ -22,6 +17,8 @@ use crate::svc::rate_limit::ChatRateLimitConfig;
 
 mod quic;
 use quic::ChatQuicConfig;
+mod embed;
+pub use embed::ChatEmbedConfig;
 
 /// What the chat configuration file is called in the config directory.
 pub const CONFIG_FILE: &str = "chat.yaml";
@@ -97,7 +94,7 @@ impl Configurable for ChatConfigProvider {
         ConfigFile::yaml(&self.config_path)
     }
 
-    /// Without the file chat is off; `enabled: true` is how it is opted in.
+    /// No file means no ingress declarations, so chat remains inactive.
     fn absent_source(&self) -> Option<ChatConfig> {
         Some(ChatConfig::default())
     }
@@ -153,97 +150,21 @@ impl Reloadable<AppState> for ChatConfigProvider {
 
 /// Chat service configuration
 #[derive(Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ChatConfig {
-    /// Enable chat runtime support (default: false).
-    #[serde(default)]
-    pub enabled: bool,
+    /// Optional Routable integration into the embedding server's web listener.
+    pub embed: Option<ChatEmbedConfig>,
 
-    /// Raw QUIC demo/prototype listener bind address.
-    #[serde(
-        default = "default_bind_address",
-        deserialize_with = "deserialize_bind_address"
-    )]
-    pub address: SocketAddr,
-
-    /// Chat route base path. Transport endpoints are configured below and
-    /// mounted under this path.
-    #[serde(default = "default_path")]
-    pub path: String,
-
-    /// WebSocket endpoint mounted under `path` (default route: `/chat/ws`).
-    #[serde(default = "default_websocket_path")]
-    pub websocket_path: String,
-
-    /// HTTP/2 CONNECT endpoint mounted under `path` (default route: `/chat/h2`).
-    #[serde(default = "default_h2_connect_path")]
-    pub h2_connect_path: String,
-
-    /// WebTransport endpoint mounted under `path` (default route: `/chat/wt`).
-    #[serde(default = "default_web_transport_path")]
-    pub web_transport_path: String,
-
-    /// Chat authentication guard configuration.
-    #[serde(default)]
-    pub auth: ChatAuthConfig,
-
-    /// Resolved vhost keys that should receive chat bindings.
-    #[serde(default, deserialize_with = "one_or_many", alias = "vhost")]
-    vhosts: Vec<Host>,
-
-    #[serde(default)]
-    /// Certificate verifier for non-websocket clients
-    ca_path: Option<PathBuf>,
-
-    /// Custom Policy for tls auth
-    /// Verifies Org/Unit/Client list
-    policy: Option<PolicyConfig>,
-
-    /// Raw QUIC demo/prototype listener transport settings.
+    /// Raw QUIC is opt-in through its own optional listener, never HTTP/3.
     quic: Option<ChatQuicConfig>,
-
-    /// WebSocket application ping interval (default: 10s). H2 CONNECT
-    /// liveness is owned by the web/HTTP2 transport service, not chat.
-    #[serde(
-        default = "default_ping_interval",
-        deserialize_with = "deserialize_duration"
-    )]
-    pub ping_interval: Duration,
-
-    /// WebSocket idle timeout (default: 60s). H2 CONNECT does not use
-    /// this to disconnect quiet readers.
-    #[serde(
-        default = "default_idle_timeout",
-        deserialize_with = "deserialize_duration"
-    )]
-    pub idle_timeout: Duration,
 
     /// Maximum message size in bytes (default: 64KB)
     #[serde(default = "default_max_message_size")]
     pub max_message_size: usize,
 
-    /// Maximum concurrent connections (default: 1000)
+    /// Shared metrics warning threshold; listener admission is transport-owned.
     #[serde(default = "default_max_connections")]
     pub max_connections: usize,
-
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_duration"
-    )]
-    pub graceful_timeout: Option<Duration>,
-    #[serde(
-        default = "default_acquire_timeout",
-        deserialize_with = "deserialize_duration"
-    )]
-    pub acquire_timeout: Duration,
-
-    #[serde(default)]
-    /// Allowed origins for WebSocket connections (supports regex)
-    /// Empty = allow all origins (insecure, dev only!)
-    /// Exact match: "https://app.example.com"
-    /// Regex: "^https?://localhost:\\d+$" (any localhost port)
-    /// Example: ["https://app.example.com", "^https?://localhost:\\d+$"]
-    pub allowed_origins: Vec<String>,
 
     /// Rate limiting configuration for svc messages
     /// Prevents spam by limiting messages per connection per time window
@@ -268,48 +189,25 @@ impl ChatConfig {
         self.quic.as_ref()
     }
 
-    pub fn policy_cfg(&self) -> Option<&PolicyConfig> {
-        self.policy.as_ref()
-    }
-
-    pub fn ca_path(&self) -> Option<&std::path::Path> {
-        self.ca_path.as_deref()
-    }
-
-    pub fn vhosts(&self) -> &[Host] {
-        self.vhosts.as_slice()
+    pub(crate) fn has_ingress(&self) -> bool {
+        self.embed.is_some()
+            || self.quic.as_ref().is_some_and(|quic| quic.listener.is_some())
     }
 
     pub(crate) fn metrics_interval(&self) -> Option<Duration> {
         self.metrics.as_ref().map(|m| m.interval)
     }
 
-    pub(crate) fn websocket_route_path(&self) -> Arc<str> {
-        join_route_path(&self.path, &self.websocket_path)
-    }
-
-    pub(crate) fn h2_connect_route_path(&self) -> Arc<str> {
-        join_route_path(&self.path, &self.h2_connect_path)
-    }
-
-    pub(crate) fn web_transport_route_path(&self) -> Arc<str> {
-        join_route_path(&self.path, &self.web_transport_path)
-    }
-
     fn validate(&self) -> Result<(), &'static str> {
         self.history.validate()?;
-        if self.auth.guard_enabled(ChatAuthGuard::Session) {
-            if self.auth.enabled_guards().len() != 1 {
-                return Err(
-                    "session chat auth cannot fall back to other guards",
-                );
-            }
-            if self.allowed_origins.is_empty() {
-                return Err("session chat auth requires allowed_origins");
-            }
+        if let Some(embed) = &self.embed {
+            embed.validate()?;
         }
         if let Some(quic) = &self.quic {
             quic.validate()?;
+            if quic.listener.is_some() && !cfg!(feature = "quic") {
+                return Err("quic.listener requires the chat quic feature");
+            }
         }
         if self.presence.sync_interval.is_zero() {
             return Err("presence.sync_interval must be greater than zero");
@@ -331,24 +229,10 @@ impl ChatConfig {
 impl Default for ChatConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
-            address: default_bind_address(),
-            path: default_path(),
-            websocket_path: default_websocket_path(),
-            h2_connect_path: default_h2_connect_path(),
-            web_transport_path: default_web_transport_path(),
-            auth: ChatAuthConfig::default(),
-            vhosts: Vec::new(),
-            ca_path: None,
-            policy: None,
+            embed: None,
             quic: None,
-            ping_interval: default_ping_interval(),
-            idle_timeout: default_idle_timeout(),
             max_message_size: default_max_message_size(),
             max_connections: default_max_connections(),
-            graceful_timeout: None,
-            acquire_timeout: default_acquire_timeout(),
-            allowed_origins: Vec::new(),
             rate_limit: ChatRateLimitConfig::default(),
             presence: ChatPresenceConfig::default(),
             history: ChatHistoryConfig::default(),
@@ -421,10 +305,6 @@ impl ChatHistoryConfig {
         }
         Ok(requested.min(i64::from(self.max_limit)))
     }
-}
-
-fn default_bind_address() -> SocketAddr {
-    "0.0.0.0:8443".parse().unwrap()
 }
 
 fn default_path() -> String {

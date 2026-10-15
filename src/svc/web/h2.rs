@@ -53,12 +53,15 @@ impl H2ConnectHandler for ChatH2ConnectHandler {
         ctx: &AuthContext,
     ) -> H2ConnectResult {
         let cfg = self.config_provider.current();
-        if cfg.auth.guard_enabled(crate::config::ChatAuthGuard::Session) {
+        let embed = cfg.embed.as_ref().ok_or_else(|| {
+            H2ConnectReject::new(StatusCode::SERVICE_UNAVAILABLE)
+        })?;
+        if embed.auth.guard_enabled(crate::config::ChatAuthGuard::Session) {
             let user = extract_session_user(
                 state,
                 ctx.host.to_cow_str().as_ref(),
                 &ctx.headers,
-                &cfg,
+                embed,
             )
             .await
             .map_err(H2ConnectReject::new)?;
@@ -70,7 +73,7 @@ impl H2ConnectHandler for ChatH2ConnectHandler {
             .and_then(|value| value.to_str().ok())
             .ok_or_else(H2ConnectReject::unauthorized)?;
         let user =
-            extract_user_from_authorization(authorization, state, &cfg.auth)
+            extract_user_from_authorization(authorization, state, &embed.auth)
                 .await
                 .map_err(|_| H2ConnectReject::unauthorized())?;
         Ok(H2ConnectAccept::authenticated(user))
