@@ -2,9 +2,7 @@
 name = "claviron-chat"
 version = "0.2.0-alpha.16"
 edition = "2024"
-authors = ["ilker Arabaci <iadeveloper@hotmail.com>"]
-# Pre-releases go to the de02 registry only, in step with claviron's version.
-publish = ["de02"]
+authors = ["ilker Arabaci <iadev09@claviron.dev>"]
 # The JavaScript client is built and shipped on its own.
 exclude = ["client/", ".idea/"]
 description = "Chat transports for a Claviron edge: WebSocket upgrade, HTTP/2 CONNECT, WebTransport, and a QUIC prototype."
@@ -69,7 +67,7 @@ urlencoding = "2.1"
 uuid = { version = "1.26", features = ["serde", "v4"] }
 
 # The same h3 fork family as claviron, so the types are shared.
-h3 = { package = "h3-forked", version = "0.0.1", optional = true }
-h3-quinn = { package = "h3-quinn-forked", version = "0.0.1", optional = true }
-h3-webtransport = { package = "h3-webtransport-forked", version = "0.0.1", optional = true }
+h3 = { package = "h3-forked", version = "0.0.3", optional = true }
+h3-quinn = { package = "h3-quinn-forked", version = "0.0.3", optional = true }
+h3-webtransport = { package = "h3-webtransport-forked", version = "0.0.3", optional = true }
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs"], optional = true }
