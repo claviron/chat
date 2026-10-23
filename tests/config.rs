@@ -4,6 +4,47 @@ use super::{
 };
 
 #[test]
+fn message_quota_selects_identity_and_guard_backing_and_rejects_invalid_bounds()
+{
+    use crate::svc::rate_limit::ChatRateLimitKey;
+    use claviron::orbit::quota::{QuotaBacking, QuotaResource};
+    use std::num::NonZeroUsize;
+
+    let mut config: ChatConfig =
+        serde_yaml::from_str("rate_limit: {key: session}").unwrap();
+    assert_eq!(config.rate_limit.key, ChatRateLimitKey::Session);
+    assert!(config.validate().is_ok());
+    let default: ChatConfig = serde_yaml::from_str("{}").unwrap();
+    assert_eq!(default.rate_limit.key, ChatRateLimitKey::User);
+    config = serde_yaml::from_str("rate_limit:\n  key: session\n  quota:\n    units: 3\n    period: 60s\n    burst: 3\n    table: {slots: 8, shards: 1, key_bytes: 32, probes: 8}\n    cas_attempts: 64\n    store:\n      mode: fleet_guard\n      resource: {fleet: example, kind: 0}\n      owners: 4\n      recovery_attempts: 0\n").unwrap();
+    assert!(matches!(
+        config.rate_limit.quota.store,
+        QuotaBacking::FleetGuard { .. }
+    ));
+    assert!(config.validate().is_ok());
+    let resource = QuotaResource { fleet: "example".parse().unwrap(), kind: 0 };
+    config.rate_limit.quota.store = QuotaBacking::FleetQuota {
+        resource,
+        owners: NonZeroUsize::new(4).unwrap(),
+        recovery_attempts: 0,
+    };
+    assert!(config.validate().is_err());
+    config.rate_limit.quota.store = QuotaBacking::LocalGuard {};
+    config.rate_limit.quota.table.key_bytes = NonZeroUsize::new(16).unwrap();
+    assert!(config.validate().is_err());
+    config.rate_limit.quota.table.key_bytes = NonZeroUsize::new(32).unwrap();
+    config.rate_limit.quota.period = std::time::Duration::ZERO;
+    assert!(config.validate().is_err());
+    for invalid in [
+        "rate_limit: {key: connection}",
+        "rate_limit: {key: ip}",
+        "rate_limit: {window: 60s, max_messages: 30}",
+    ] {
+        assert!(serde_yaml::from_str::<ChatConfig>(invalid).is_err());
+    }
+}
+
+#[test]
 fn raw_quic_listener_is_opt_in_and_old_root_bind_fields_are_rejected() {
     for yaml in ["{}", "quic: {}", "quic: {listener: null}"] {
         let config: ChatConfig = serde_yaml::from_str(yaml).unwrap();

@@ -62,6 +62,11 @@ impl ChatClient {
         })
     }
 
+    /// Stable verified login identity, shared by reconnects and token refreshes.
+    pub(crate) fn quota_session_id(&self) -> Option<[u8; 16]> {
+        self.session.as_ref()?.principal().session_id().map(|id| id.0)
+    }
+
     pub fn user(&self) -> &ChatUser {
         &self.user
     }

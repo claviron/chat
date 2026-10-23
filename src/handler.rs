@@ -40,19 +40,14 @@ pub(crate) async fn handle_client_message(
 
         ClientMessage::SendToRoom { uuid, room, content } => {
             // Check rate limit before sending
-            if let Err(retry_after) =
-                server.check_rate_limit(client.connection_id())
-            {
+            if let Err(error) = server.check_rate_limit(client) {
                 let _ = client
                     .send(ServerMessage::message_status(
                         uuid,
                         MessageStatusType::Failed,
                     ))
                     .await;
-                Err(format!(
-                    "Rate limit exceeded. Try again in {} seconds",
-                    retry_after
-                ))
+                Err(error.to_string())
             } else {
                 match server
                     .send_to_room(client.user_id(), &room, uuid, content)
@@ -78,19 +73,14 @@ pub(crate) async fn handle_client_message(
 
         ClientMessage::SendDirect { uuid, to_user_uuid, content } => {
             // Check rate limit before sending
-            if let Err(retry_after) =
-                server.check_rate_limit(client.connection_id())
-            {
+            if let Err(error) = server.check_rate_limit(client) {
                 let _ = client
                     .send(ServerMessage::message_status(
                         uuid,
                         MessageStatusType::Failed,
                     ))
                     .await;
-                Err(format!(
-                    "Rate limit exceeded. Try again in {} seconds",
-                    retry_after
-                ))
+                Err(error.to_string())
             } else {
                 match server.user_id_by_uuid(&to_user_uuid).await {
                     Ok(to_user_id) => {

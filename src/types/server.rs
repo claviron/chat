@@ -30,7 +30,9 @@ use crate::models::receipts::ReceiptStore;
 use crate::models::users::by_identifier;
 use crate::models::users::{ChatUser, by_local_id, by_subject, hydrate_users};
 use crate::presence::PresenceRegistry;
-use crate::svc::rate_limit::ChatRateLimiter;
+use crate::svc::rate_limit::{
+    ChatRateLimitConfig, ChatRateLimitError, ChatRateLimiter,
+};
 use crate::types::messages::{
     HistoryMessage, MessageStatusType, OnlineUserInfo, ReadReceipt, RoomInfo,
     ServerMessage, UnreadPrivateDetail, UnreadRoomCount, UnreadSummary,
@@ -78,8 +80,8 @@ pub struct ChatServer {
 
     /// Rate limiter for spam prevention. Derived from the provider's
     /// snapshot at boot/reload — kept here because it's a runtime
-    /// object (not a config slice). `None` until `Bootable::boot()`
-    /// runs; `check_rate_limit` fails open in that window.
+    /// object (not a config slice). Missing state fails closed. Master does
+    /// not open quota resources; only serving workers/standalone own them.
     rate_limiter: Arc<ArcSwapOption<ChatRateLimiter>>,
 
     /// Postgres pool. Set once at `Bootable::boot()` from `DbService`.
@@ -278,33 +280,47 @@ impl ChatServer {
         self.config_provider().current()
     }
 
-    /// Checks whether the given connection is allowed to send a message *right now*.
-    ///
-    /// This uses `ArcSwap::load()` to take a cheap, lock-free snapshot of the current
-    /// [`ChatRateLimiter`] and performs the check through that snapshot.
-    ///
-    /// Important:
-    /// - The returned guard is **not** stored anywhere; it lives only for the duration
-    ///   of this function call.
-    /// - If `reload()` swaps the limiter concurrently, this call will still use a
-    ///   consistent snapshot (either the old or the new limiter), which is exactly
-    ///   what we want.
-    ///
-    /// Returns:
-    /// - `Ok(())` if the connection may proceed.
-    /// - `Err(retry_after_ms)` if the connection is rate limited.
+    /// Charge the authenticated identity, never the connection ID. A concurrent
+    /// reload cannot replace the store beneath this call's retained handle.
     pub fn check_rate_limit(
         &self,
-        connection_id: Uuid,
-    ) -> Result<(), u64> {
-        // `None` only happens before `Bootable::boot()` runs — the
-        // listener doesn't bind in that window, so a request reaching
-        // here without a limiter is an invariant break, not an
-        // operator state. Fail open with `Ok(())` rather than panic.
+        client: &ChatClient,
+    ) -> Result<(), ChatRateLimitError> {
         match self.rate_limiter.load_full() {
-            Some(limiter) => limiter.check(connection_id),
-            None => Ok(()),
+            Some(limiter) => limiter.check(client),
+            None => Err(ChatRateLimitError::Unavailable),
         }
+    }
+
+    fn prepare_rate_limit(
+        &self,
+        config: &ChatRateLimitConfig,
+        runtime_fleet: &str,
+    ) -> claviron::runtime::registry::Result<()> {
+        if config
+            .quota
+            .resource()
+            .is_some_and(|resource| resource.fleet.as_str() == runtime_fleet)
+        {
+            return Err(RegistryError::msg(
+                "chat quota requires a dedicated namespace, not the runtime fleet",
+            ));
+        }
+        if self
+            .rate_limiter
+            .load()
+            .as_ref()
+            .is_some_and(|current| current.matches(config))
+        {
+            return Ok(());
+        }
+        let limiter = ChatRateLimiter::new(config).map_err(|error| {
+            RegistryError::msg(format!(
+                "chat quota preparation failed: {error}"
+            ))
+        })?;
+        self.rate_limiter.store(Some(Arc::new(limiter)));
+        Ok(())
     }
 
     fn emit_delivery(
@@ -2184,11 +2200,9 @@ impl Reloadable<AppState> for ChatServer {
                 .map(Arc::new),
         );
 
-        let new_rate_limiter = ChatRateLimiter::new(
-            cfg.rate_limit.window,
-            cfg.rate_limit.max_messages,
-        );
-        self.rate_limiter.store(Some(Arc::new(new_rate_limiter)));
+        if cfg.has_ingress() && !_state.is_master() {
+            self.prepare_rate_limit(&cfg.rate_limit, _state.fleet_name())?;
+        }
         Ok(())
     }
 }
@@ -2197,7 +2211,8 @@ impl Reloadable<AppState> for ChatServer {
 impl Bootable<AppState, <Self as Component<AppState>>::Deps> for ChatServer {
     /// Derive the rate limiter from the applied configuration and — if chat
     /// is enabled — take the identity, auth and database handles from the
-    /// registry. No file I/O, nothing opened, nothing spawned.
+    /// registry. Serving owners may open quota-only SHM; no database connection,
+    /// network listener or background task is started here.
     async fn boot(
         &self,
         deps: <Self as Component<AppState>>::Deps,
@@ -2208,14 +2223,11 @@ impl Bootable<AppState, <Self as Component<AppState>>::Deps> for ChatServer {
         #[cfg(not(feature = "log-pipeline"))]
         let (db, events) = deps;
         let cfg = self.config_snapshot();
-        let new_rate_limiter = ChatRateLimiter::new(
-            cfg.rate_limit.window,
-            cfg.rate_limit.max_messages,
-        );
-        self.rate_limiter.store(Some(Arc::new(new_rate_limiter)));
-
         if !cfg.has_ingress() {
             return Ok(());
+        }
+        if !state.is_master() {
+            self.prepare_rate_limit(&cfg.rate_limit, state.fleet_name())?;
         }
 
         #[cfg(feature = "log-pipeline")]
@@ -2299,3 +2311,7 @@ mod user_provider_order_tests;
 #[cfg(test)]
 #[path = "../../tests/user_directory.rs"]
 mod user_directory_tests;
+
+#[cfg(test)]
+#[path = "../../tests/rate_limit_server.rs"]
+mod rate_limit_tests;

@@ -166,8 +166,7 @@ pub struct ChatConfig {
     #[serde(default = "default_max_connections")]
     pub max_connections: usize,
 
-    /// Rate limiting configuration for svc messages
-    /// Prevents spam by limiting messages per connection per time window
+    /// Message quota shared by the selected authenticated user or session.
     #[serde(default)]
     pub rate_limit: ChatRateLimitConfig,
 
@@ -199,6 +198,7 @@ impl ChatConfig {
     }
 
     fn validate(&self) -> Result<(), &'static str> {
+        self.rate_limit.validate()?;
         self.history.validate()?;
         if let Some(embed) = &self.embed {
             embed.validate()?;

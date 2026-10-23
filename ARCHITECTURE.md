@@ -441,6 +441,72 @@ typing events are excluded. Channel publication failures go to `tracing`, not
 back into the failed channel. Channel levels are explicit record metadata;
 `RUST_LOG` continues to control system diagnostics, not these records.
 
+## Message quota
+
+`rate_limit` is Chat message policy, not an HTTP route extension. Room and direct
+message sends consume one quota unit before storage or delivery on every
+transport. Identity comes from the authenticated Chat client, never message
+fields, IP addresses, socket IDs or token bytes.
+
+`key: user` (default) uses the user's binary UUID. Tabs, devices, WT streams and
+reconnects share that identity's budget. `key: session` uses the verified Orbit
+session ID: connections and refreshed credentials for the same login share a
+budget, while a different login gets a separate one. A client without a verified
+session cannot send in session mode; there is no user/connection fallback. This
+includes ticket and raw mTLS clients, which currently retain no Orbit session.
+
+```yaml
+rate_limit:
+  key: user                     # user | session
+  quota:
+    units: 30
+    period: 60s
+    burst: 30
+    table:
+      slots: 10000
+      shards: 16
+      key_bytes: 32
+      probes: 8
+    cas_attempts: 64
+    store:
+      mode: local_guard
+```
+
+These are the default bounds. `LocalGuard` shares one store across connections
+in one worker/standalone process. For a common budget across workers, replace
+`store` with an explicit dedicated quota resource:
+
+```yaml
+store:
+  mode: fleet_guard
+  resource: {fleet: chatq, kind: 0}
+  owners: 16
+  recovery_attempts: 0
+```
+
+Size `owners` for serving processes and any overlapping restart/reload owners.
+Master does not open the store. Do not use the runtime fleet or another
+subsystem's resource: Chat never clears, resets or unlinks quota SHM. Matching
+opens/reopens preserve committed debt; incompatible geometry/policy fails
+instead of silently resetting it. Only LocalGuard and FleetGuard are accepted.
+Both use bounded, non-waiting GCRA admission, not a fixed window. Guard stores
+may replace cold identities under table pressure; retained debt is not an
+unconditional account entitlement. There is no background quota task or timer.
+
+Disconnect never deletes a quota key. Reloading an unchanged definition retains
+the existing handle and debt. Changing a local definition deliberately creates
+a new store; failed preparation keeps the previous one. Local process restart
+starts a new local budget. Fleet debt survives a serving process restart.
+Quota exhaustion returns the existing failed message status and a rate error
+with rounded-up retry seconds. Store Busy/errors or missing preparation refuse
+the message as unavailable, not as exhausted quota, and never fail open.
+
+Old `rate_limit.window` / `max_messages` declarations must be migrated to
+`rate_limit.quota.period` / `units`, with an explicit burst and storage bounds.
+The default remains 30 messages per minute with burst 30, now per user instead
+of per connection. History, typing and presence retain their existing behavior;
+this quota is not transport admission or a blanket DDoS defense.
+
 ## Worker Fanout
 
 `ChatServer` keeps only worker-local connection and room membership
@@ -548,8 +614,10 @@ Every provider is registered in every process through `Register<AppState>`;
 `ChatServer`, `ChatWebService` and `ChatQuicService` are handed the config
 provider at registration and read its snapshot, never the file.
 
-Boot holds no I/O: `ChatServer::boot` derives the rate limiter and takes the
-identity, auth and database handles; `ChatWebService::boot` contributes the
+`ChatServer::boot` prepares the message quota in serving processes (local
+allocation or an explicit quota-only SHM open) and takes the identity, auth and
+database handles; it does not connect to a database or bind listeners.
+`ChatWebService::boot` contributes the
 H2 CONNECT and WebTransport handlers to the edge registries for the configured
 hosts, before host routers are compiled. The owned work — the delivery and
 presence listeners, the presence refresh, the QUIC listener — lives in

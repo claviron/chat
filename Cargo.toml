@@ -34,6 +34,7 @@ claviron = { path = "../claviron", default-features = false, features = [
     "edge",
     "hosting", # tls + db
     "cache",
+    "rate-limit", # prepared quota stores; Chat owns message admission, not routes
     "postgres", # chat.* tables and DbService's claviron pool live on PostgreSQL
     "websocket", # HTTP/1.1 Upgrade and extended CONNECT
 ] }
@@ -71,3 +72,6 @@ h3 = { package = "h3-forked", version = "0.0.3", optional = true }
 h3-quinn = { package = "h3-quinn-forked", version = "0.0.3", optional = true }
 h3-webtransport = { package = "h3-webtransport-forked", version = "0.0.3", optional = true }
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs"], optional = true }
+
+[dev-dependencies]
+tempfile = "3"
