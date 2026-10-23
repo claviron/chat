@@ -1,25 +1,28 @@
 use async_trait::async_trait;
-use bytes::BytesMut;
+use std::sync::Arc;
+
 use claviron::edge::{
-    AnyAuthenticated, AuthContext, H3WebTransportSession, WebTransportAccept,
-    WebTransportHandler, WebTransportReject, WebTransportResult,
+    AnyAuthenticated, AuthContext, H3WebTransportBiStream,
+    H3WebTransportSession, WebTransportAccept, WebTransportHandler,
+    WebTransportReject, WebTransportResult,
 };
 use claviron::runtime::AppState;
 use claviron::runtime::registry::{
     Error as RegistryError, Result as RegistryResult,
 };
-use h3_webtransport::server::AcceptedBi;
 use tokio::sync::mpsc;
-use tracing::{debug, error, warn};
+use tracing::{debug, warn};
 
 use super::auth::{extract_session_user, extract_user_from_authorization};
-use super::framing::{read_client_message, write_server_message};
-use crate::config::ChatConfigProvider;
+use crate::config::{ChatConfig, ChatConfigProvider};
 use crate::svc::WELCOME_MESSAGE;
 #[cfg(feature = "metrics")]
 use crate::svc::metrics::CHAT_METRICS;
 use crate::types::messages::{ServerMessage, UnreadSummary};
 use crate::{ChatClient, ChatServer, handle_client_message};
+
+mod io;
+mod streams;
 
 pub(crate) struct ChatWebTransportHandler {
     config_provider: std::sync::Arc<ChatConfigProvider>,
@@ -74,160 +77,154 @@ impl WebTransportHandler for ChatWebTransportHandler {
     async fn handle(
         &self,
         state: AppState,
-        ctx: AuthContext,
+        mut ctx: AuthContext,
         authenticated: Option<AnyAuthenticated>,
         session: H3WebTransportSession,
     ) -> RegistryResult<()> {
-        drop(ctx); // Do not retain credential headers for the connection lifetime.
+        // Retain native drain ownership, not credential headers or the URI.
+        let admission = ctx.admission.take();
+        let graceful = ctx.graceful.take();
+        drop(ctx);
         let user = authenticated
             .ok_or_else(|| {
                 RegistryError::msg("chat WebTransport auth missing")
             })?
             .take::<crate::types::client::ChatAuthentication>()?;
-        handle_web_transport_chat(state, user, session).await
+        let server = state
+            .registry_ref()
+            .resolve::<ChatServer>()
+            .ok_or_else(|| RegistryError::msg("ChatServer not registered"))?;
+        let config = server.config_snapshot();
+        let shutdown = async {
+            let listener = async {
+                match &admission {
+                    Some(permit) => permit.wait_graceful_shutdown().await,
+                    None => std::future::pending().await,
+                }
+            };
+            let host = async {
+                match graceful {
+                    Some(signal) => signal.await,
+                    None => std::future::pending().await,
+                }
+            };
+            tokio::select! {
+                () = listener => {},
+                () = host => {},
+                () = state.on_shutdown() => {},
+                closed = session.closed() => {
+                    if let Err(error) = closed {
+                        debug!(%error, "WebTransport chat CONNECT ended");
+                    }
+                },
+            }
+        };
+        streams::run(
+            || session.accept_bi(),
+            session.incoming_capacity(),
+            shutdown,
+            |stream: H3WebTransportBiStream, ended| {
+                serve_stream(
+                    stream,
+                    Arc::clone(&server),
+                    Arc::clone(&config),
+                    crate::types::client::ChatAuthentication {
+                        user: user.user.clone(),
+                        session: user.session.clone(),
+                    },
+                    streams::wait_end(ended),
+                )
+            },
+        )
+        .await;
+        Ok(())
     }
 }
 
-async fn handle_web_transport_chat(
-    state: AppState,
+async fn serve_stream<S>(
+    stream: S,
+    server: Arc<ChatServer>,
+    chat_config: Arc<ChatConfig>,
     authenticated: crate::types::client::ChatAuthentication,
-    session: H3WebTransportSession,
-) -> RegistryResult<()> {
+    shutdown: impl std::future::Future<Output = ()>,
+) where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     let crate::types::client::ChatAuthentication {
         user,
         session: auth_session,
     } = authenticated;
-    let server = state
-        .registry_ref()
-        .resolve::<ChatServer>()
-        .ok_or_else(|| RegistryError::msg("ChatServer not registered"))?;
-    let chat_config = server.config_snapshot();
     let max_frame = chat_config.max_message_size;
-
-    let stream = match accept_chat_stream(&session).await? {
-        Some(stream) => stream,
-        None => return Ok(()),
-    };
-    let (mut reader, mut writer) = tokio::io::split(stream);
-    let (client_tx, mut client_rx) = mpsc::channel::<ServerMessage>(max_frame);
+    // Preserve the existing outbound bound; input overlaps the handler by
+    // one queued message and one pending message, independently of output.
+    let (client_tx, client_rx) = mpsc::channel::<ServerMessage>(max_frame);
+    let (events, mut happened) = mpsc::channel(1);
 
     let client = ChatClient::new(user.clone(), client_tx.clone())
         .with_session(auth_session);
     if !client.auth_valid() {
-        return Err(RegistryError::msg("chat session expired or revoked"));
+        return;
     }
     let connection_id = client.connection_id();
-    server.connect_client(client.clone()).await;
+    let handling = async {
+        server.connect_client(client.clone()).await;
 
-    #[cfg(feature = "metrics")]
-    CHAT_METRICS.connect();
+        #[cfg(feature = "metrics")]
+        CHAT_METRICS.connect();
 
-    let unread_summary = server.get_unread_summary(user.id()).await.unwrap_or_else(|e| {
-        warn!(username = user.username(), error = %e, "failed to fetch unread counts");
-        UnreadSummary { private_messages_count: 0, room_messages: vec![] }
-    });
-    let _ = client_tx
-        .send(ServerMessage::welcome(
-            connection_id,
-            user.uuid(),
-            user.username_arc().clone(),
-            user.name_arc().clone(),
-            WELCOME_MESSAGE,
-            unread_summary,
-            chat_config.history.clone(),
-        ))
-        .await;
-
-    let mut inbound = BytesMut::new();
-    debug!(
-        username = %user.username(),
-        connection_id = %connection_id,
-        session_id = ?session.session_id(),
-        "starting WebTransport chat session"
-    );
-
-    loop {
-        tokio::select! {
-            _ = state.on_shutdown() => break,
-            Some(msg) = client_rx.recv() => {
-                if !client.auth_valid() { break; }
-                if let Err(err) = write_server_message(&mut writer, msg, max_frame).await {
-                    error!(username = user.username(), error = %err, "failed to write WebTransport chat frame");
-                    break;
+        let unread_summary = server
+            .get_unread_summary(user.id())
+            .await
+            .unwrap_or_else(|error| {
+                warn!(username = user.username(), %error, "failed to fetch unread counts");
+                UnreadSummary {
+                    private_messages_count: 0,
+                    room_messages: vec![],
                 }
-                #[cfg(feature = "metrics")]
-                CHAT_METRICS.message_sent();
-            }
-            result = read_client_message(&mut reader, &mut inbound, max_frame) => {
-                match result {
-                    Ok(Some(msg)) => {
-                        if !client.auth_valid() { break; }
-                        #[cfg(feature = "metrics")]
-                        CHAT_METRICS.message_received();
-                        handle_client_message(server.as_ref(), &client, msg).await;
-                    }
-                    Ok(None) => break,
-                    Err(err) => {
-                        warn!(username = user.username(), error = %err, "WebTransport chat input failed");
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    #[cfg(feature = "metrics")]
-    CHAT_METRICS.disconnect();
-
-    server.disconnect_client(connection_id).await;
-    debug!(
-        username = %user.username(),
-        connection_id = %connection_id,
-        "WebTransport chat session closed"
-    );
-    Ok(())
-}
-
-async fn accept_chat_stream(
-    session: &H3WebTransportSession
-) -> RegistryResult<
-    Option<
-        h3_webtransport::stream::BidiStream<
-            h3_quinn::BidiStream<bytes::Bytes>,
-            bytes::Bytes,
-        >,
-    >,
-> {
-    loop {
-        let accepted = session.accept_bi().await.map_err(|err| {
-            RegistryError::msg(format!(
-                "WebTransport chat stream accept failed: {err}"
+            });
+        let _ = client_tx
+            .send(ServerMessage::welcome(
+                connection_id,
+                user.uuid(),
+                user.username_arc().clone(),
+                user.name_arc().clone(),
+                WELCOME_MESSAGE,
+                unread_summary,
+                chat_config.history.clone(),
             ))
-        })?;
-        let Some(accepted) = accepted else {
-            return Ok(None);
-        };
-        let resolved = accepted.resolve().await.map_err(|err| {
-            RegistryError::msg(format!(
-                "WebTransport chat stream resolve failed: {err}"
-            ))
-        })?;
-        match resolved {
-            AcceptedBi::BidiStream(session_id, stream)
-                if session_id == session.session_id() =>
-            {
-                return Ok(Some(stream));
+            .await;
+
+        debug!(
+            username = %user.username(),
+            connection_id = %connection_id,
+            "starting WebTransport chat stream"
+        );
+
+        while let Some(msg) = happened.recv().await {
+            if !client.auth_valid() {
+                break;
             }
-            AcceptedBi::BidiStream(session_id, _) => {
-                warn!(
-                    expected = ?session.session_id(),
-                    actual = ?session_id,
-                    "ignoring WebTransport stream for another session"
-                );
-            }
-            AcceptedBi::Request(_, _) => {
-                warn!("ignoring HTTP/3 request on WebTransport chat session");
-            }
+            #[cfg(feature = "metrics")]
+            CHAT_METRICS.message_received();
+            // Do not cancel accepted application work on listener/session drain.
+            handle_client_message(server.as_ref(), &client, msg).await;
         }
-    }
+        // Wake the driver if dispatch ends before peer input or shutdown.
+        drop(happened);
+
+        #[cfg(feature = "metrics")]
+        CHAT_METRICS.disconnect();
+
+        server.disconnect_client(connection_id).await;
+        debug!(
+            username = %user.username(),
+            connection_id = %connection_id,
+            "WebTransport chat stream closed"
+        );
+    };
+    let driving =
+        io::drive(stream, client_rx, events, max_frame, shutdown, || {
+            client.auth_valid()
+        });
+    tokio::join!(handling, driving);
 }

@@ -1,6 +1,25 @@
 use super::*;
 use claviron::auth::{AnyAuthenticated, UserProviderError};
 
+struct NoLookup;
+
+#[async_trait]
+impl UserProvider for NoLookup {
+    async fn find_by_subject(
+        &self,
+        _: &str,
+    ) -> Result<Option<AnyAuthenticated>, UserProviderError> {
+        panic!("directory fixtures must not resolve subjects")
+    }
+
+    async fn find_by_local_id(
+        &self,
+        _: i64,
+    ) -> Result<Option<AnyAuthenticated>, UserProviderError> {
+        panic!("local room members must use their existing user snapshots")
+    }
+}
+
 struct Contacts(Vec<AnyAuthenticated>);
 
 #[async_trait]
@@ -25,6 +44,7 @@ impl UserDirectory for Unavailable {
 
 fn server() -> ChatServer {
     let server = ChatServer::empty();
+    assert!(server.users.set(Arc::new(NoLookup)).is_ok());
     assert!(
         server
             .config_provider
