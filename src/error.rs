@@ -53,7 +53,7 @@ pub enum AuthError {
     #[error("internal error: {0}")]
     Internal(String),
     #[error(transparent)]
-    Orbit(#[from] claviron::auth::orbit::AuthError),
+    Orbit(#[from] claviron::auth::session::AuthError),
 }
 
 impl From<String> for AuthError {

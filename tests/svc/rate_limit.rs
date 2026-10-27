@@ -1,11 +1,12 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use claviron::auth::orbit::auth::{
+use claviron::auth::session::VerifiedSession;
+use claviron::auth::session::auth::{
     Audience, Authority, Blake3State, Claims, FleetAuth, Keyring, Purpose,
     SecretKey, Session, Validation,
 };
-use claviron::auth::orbit::{OrbitAuth, TokenAuthenticator, VerifiedSession};
+use claviron::auth::session::token::{OrbitAuth, TokenAuthenticator};
 use claviron::auth::{AnyAuthenticated, UserProvider, UserProviderError};
 use claviron::orbitive::Fleet;
 use tokio::sync::mpsc;

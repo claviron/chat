@@ -12,7 +12,7 @@ pub trait SessionAuthenticator: Send + Sync + 'static {
         &self,
         vhost: &str,
         headers: &http::HeaderMap,
-    ) -> Result<claviron::auth::orbit::AuthenticatedSession, http::StatusCode>;
+    ) -> Result<claviron::auth::session::AuthenticatedSession, http::StatusCode>;
 }
 
 /// Optional application-owned contacts, including users who are offline.

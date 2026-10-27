@@ -4,7 +4,7 @@ use std::sync::{Arc, OnceLock};
 use arc_swap::ArcSwapOption;
 use async_trait::async_trait;
 use claviron::auth::UserProvider;
-use claviron::auth::orbit::TokenAuthenticator;
+use claviron::auth::session::token::TokenAuthenticator;
 use claviron::db::DbService;
 #[cfg(feature = "log-pipeline")]
 use claviron::logging::pipeline::{Level, LogChannels, Value};

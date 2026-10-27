@@ -3,11 +3,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use claviron::auth::orbit::auth::{
+use claviron::auth::session::auth::{
     Audience, Authority, Blake3State, Claims, FleetAuth, Keyring, Purpose,
     SecretKey, Validation,
 };
-use claviron::auth::orbit::{OrbitAuth, TokenAuthenticator};
+use claviron::auth::session::token::{OrbitAuth, TokenAuthenticator};
 use claviron::auth::{AnyAuthenticated, UserProvider, UserProviderError};
 use claviron::orbitive::Fleet;
 use fastwebsockets::{Frame, Payload};

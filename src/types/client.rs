@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use claviron::auth::orbit::VerifiedSession;
+use claviron::auth::session::VerifiedSession;
 use mpsc::Sender;
 use tokio::sync::{RwLock, mpsc};
 use tracing::warn;

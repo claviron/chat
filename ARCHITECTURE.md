@@ -55,7 +55,7 @@ The ignored `models::tests::runtime_queries_preserve_chat_storage_contracts`
 test exercises writes, nullable timestamps, counts, unread summaries and
 receipts against an isolated empty PostgreSQL database. Run it with
 `CLAVIRON_CHAT_TEST_DATABASE_URL` set and
-`cargo test -p claviron-chat runtime_queries_preserve_chat_storage_contracts -- --ignored`.
+`cargo test --workspace --all-features runtime_queries_preserve_chat_storage_contracts -- --ignored`.
 It creates the test schema inside a transaction and rolls it back afterward;
 it refuses to replace an existing `chat` schema.
 
@@ -73,8 +73,8 @@ feature flags enabled, not direct path dependencies on:
 - `claviron-tls`
 - `claviron-edge`
 
-Authentication comes from `claviron::auth::orbit`; chat has no JWT dependency.
-Claviron forwards the selected `auth` + `orbit` features to the optional adapter.
+Authentication comes from `claviron::auth::session`; chat has no JWT dependency.
+The `claviron` dependency enables the required session and Orbit adapters.
 Orbitive remains framework-neutral and does not own chat semantics.
 
 Bootstrap ownership is already at the app boundary: the app conditionally
@@ -92,10 +92,11 @@ decides whether the chat service is installed.
 
 `sql/access.sql` is the one grant a deployment needs to let a role use chat
 storage: row access (SELECT, INSERT, UPDATE, DELETE) on `chat.*` and default
-privileges for tables later chat migrations create as `roman`. It never grants
-CREATE, TRUNCATE or any other schema, so the role cannot change the tables it
-uses. Run it as a superuser with `-v role=<role>`; `-v create=1` also creates
-that role as a peer-auth LOGIN with no other rights.
+privileges for tables later chat migrations create as the specified owner.
+It never grants CREATE, TRUNCATE or any other schema, so the role cannot change
+the tables it uses. Run it as a superuser with `-v owner=<migration-owner>` and
+`-v role=<service-role>`; `-v create=1` also creates that role as a peer-auth LOGIN
+with no other rights.
 
 ## Browser Client Artifact
 
@@ -192,7 +193,7 @@ registries. It registers the configured WebSocket route
 feature, HTTP/3 WebTransport route
 `<chat.path><chat.web_transport_path>` for each configured chat host key
 during boot; it does not bind a separate socket. Defaults come from
-serde default functions and are documented in `config/chat.yaml`
+serde default functions in `config.rs`
 (`/chat/ws`, `/chat/h2`, and `/chat/wt` by default).
 
 The WebSocket path is also registered for RFC 8441 extended CONNECT. It shares

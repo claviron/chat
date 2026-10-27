@@ -1,15 +1,15 @@
 -- Access to the `chat` schema for one database role. Run as a superuser:
 --
 --   grant an existing role:
---     sudo -u postgres psql -d roma -v role=portico -f crates/chat/sql/access.sql
+--     psql -d example_db -v owner=chat_owner -v role=chat_service -f sql/access.sql
 --   create a login role for chat, then grant it:
---     sudo -u postgres psql -d roma -v role=chat -v create=1 -f crates/chat/sql/access.sql
+--     psql -d example_db -v owner=chat_owner -v role=chat_service -v create=1 -f sql/access.sql
 --
 -- claviron-chat owns only `chat.*` tables (see ARCHITECTURE.md, Crate
 -- Boundary), so this grants row access there and nothing else. The role
 -- reads and writes rows; it cannot create, alter, drop or truncate a table
--- (no CREATE on the schema, no TRUNCATE, and only the owner `roman` may ALTER
--- or DROP), and it sees no other schema. The schema itself belongs to `roman` and is created by the
+-- (no CREATE on the schema, no TRUNCATE, and only its owner may ALTER
+-- or DROP), and it sees no other schema. The schema belongs to the migration owner and is created by the
 -- migrations; a created role is a peer-auth LOGIN with no superuser,
 -- CREATEROLE, CREATEDB or membership. Idempotent.
 
@@ -17,7 +17,13 @@
 
 \if :{?role}
 \else
-  \echo 'usage: psql -d roma -v role=<role> [-v create=1] -f access.sql'
+  \echo 'usage: psql -d <database> -v owner=<migration-owner> -v role=<service-role> [-v create=1] -f access.sql'
+  \quit
+\endif
+
+\if :{?owner}
+\else
+  \echo 'owner is required: specify the role that creates chat tables'
   \quit
 \endif
 
@@ -35,12 +41,12 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES    IN SCHEMA chat TO :"role";
 GRANT USAGE, SELECT, UPDATE          ON ALL SEQUENCES IN SCHEMA chat TO :"role";
 GRANT EXECUTE                        ON ALL FUNCTIONS IN SCHEMA chat TO :"role";
 
--- Tables and sequences later chat migrations create (as roman) follow.
-ALTER DEFAULT PRIVILEGES FOR ROLE roman IN SCHEMA chat
+-- Tables and sequences later chat migrations create as the owner follow.
+ALTER DEFAULT PRIVILEGES FOR ROLE :"owner" IN SCHEMA chat
   GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO :"role";
-ALTER DEFAULT PRIVILEGES FOR ROLE roman IN SCHEMA chat
+ALTER DEFAULT PRIVILEGES FOR ROLE :"owner" IN SCHEMA chat
   GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO :"role";
-ALTER DEFAULT PRIVILEGES FOR ROLE roman IN SCHEMA chat
+ALTER DEFAULT PRIVILEGES FOR ROLE :"owner" IN SCHEMA chat
   GRANT EXECUTE ON FUNCTIONS TO :"role";
 
 COMMIT;

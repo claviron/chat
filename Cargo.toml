@@ -3,9 +3,24 @@ name = "claviron-chat"
 version = "0.2.0-alpha.16"
 edition = "2024"
 authors = ["ilker Arabaci <iadev09@claviron.dev>"]
+license = "MIT OR Apache-2.0"
 # The JavaScript client is built and shipped on its own.
-exclude = ["client/", ".idea/"]
-description = "Chat transports for a Claviron edge: WebSocket upgrade, HTTP/2 CONNECT, WebTransport, and a QUIC prototype."
+include = [
+    "/src/**",
+    "/tests/**",
+    "/sql/**",
+    "/README.md",
+    "/ARCHITECTURE.md",
+    "/CHAT_CLIENT_API.md",
+    "/LICENSE-MIT",
+    "/LICENSE-APACHE",
+]
+description = "Chat service for Claviron with rooms, private messages, presence, and delivery receipts."
+repository = "https://git.claviron.dev/claviron/chat"
+homepage = "https://claviron.dev"
+documentation = "https://docs.rs/claviron-chat"
+keywords = ["chat", "websocket", "webtransport", "realtime", "claviron"]
+categories = ["network-programming", "web-programming", "asynchronous"]
 autotests = false
 
 # A service an edge binary takes as a direct dependency, beside the
@@ -28,7 +43,7 @@ webtransport = [
 metrics = []
 
 [dependencies]
-claviron = { path = "../claviron", default-features = false, features = [
+claviron = { version = "0.2.0-alpha.23", default-features = false, features = [
     "auth",
     "server",
     "edge",
