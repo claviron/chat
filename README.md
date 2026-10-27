@@ -38,8 +38,9 @@ a user directory and avatar URLs.
 - `metrics`: Chat connection and message counters.
 - `quic`: experimental raw QUIC transport with its own configured listener.
 
-This source targets Claviron `0.2.0-alpha.23`. `claviron-chat` is not yet published
-to crates.io. The browser client in `client/` is built separately; see the
+This release targets Claviron `0.2.0-alpha.23`. Add the service with
+`claviron-chat = "0.2.0-alpha.16"`. The browser client in `client/` is built
+separately; see the
 [client API](CHAT_CLIENT_API.md) for messages and transport framing and
 [architecture](ARCHITECTURE.md) for configuration and lifecycle details.
 
