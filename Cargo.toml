@@ -30,16 +30,8 @@ autotests = false
 [features]
 default = []
 log-pipeline = ["claviron/log-pipeline"]
-quic = [
-    "dep:quinn",
-    "dep:h3",
-    "dep:h3-quinn",
-]
-webtransport = [
-    "dep:h3-webtransport",
-    "dep:h3-quinn",
-    "claviron/webtransport",
-]
+quic = ["dep:quinn"]
+webtransport = ["claviron/webtransport"]
 metrics = []
 
 [dependencies]
@@ -98,11 +90,8 @@ uuid = { version = "1.26", features = ["serde", "v4"] }
 thiserror = "2.0"
 tracing = "0.1"
 
-# ── HTTP/3 (QUIC) ────────────────────────────────────────────────────
-# The same h3 fork family as claviron, so the types are shared.
-h3 = { package = "h3-forked", version = "0.0.3", optional = true }
-h3-quinn = { package = "h3-quinn-forked", version = "0.0.3", optional = true }
-h3-webtransport = { package = "h3-webtransport-forked", version = "0.0.3", optional = true }
+# ── Raw QUIC prototype ──────────────────────────────────────────────
+# HTTP/3 and WebTransport sessions come through the Claviron facade.
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs"], optional = true }
 
 [dev-dependencies]

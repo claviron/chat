@@ -5,8 +5,19 @@ use bytes::BytesMut;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
 
-use super::super::framing::{read_client_message, write_server_message};
+use super::super::framing::{
+    FrameError, read_client_message, write_server_message,
+};
 use crate::types::messages::{ClientMessage, ServerMessage};
+
+fn session_ended(error: &FrameError) -> bool {
+    match error {
+        FrameError::Io(error) => {
+            claviron::edge::webtransport_session_ended(error)
+        }
+        FrameError::Invalid(_) => false,
+    }
+}
 
 pub(super) async fn drive<S>(
     stream: S,
@@ -42,7 +53,11 @@ pub(super) async fn drive<S>(
                     Ok(Some(message)) if valid() => pending = Some(message),
                     Ok(_) => break,
                     Err(error) => {
-                        tracing::warn!(%error, "WebTransport chat input failed");
+                        if session_ended(&error) {
+                            tracing::debug!(%error, "WebTransport chat input ended");
+                        } else {
+                            tracing::warn!(%error, "WebTransport chat input failed");
+                        }
                         break;
                     }
                 }
@@ -104,7 +119,11 @@ async fn write<W: AsyncWrite + Unpin>(
             result = &mut sending => result,
         };
         if let Err(error) = result {
-            tracing::error!(%error, "WebTransport chat output failed");
+            if session_ended(&error) {
+                tracing::debug!(%error, "WebTransport chat output ended");
+            } else {
+                tracing::error!(%error, "WebTransport chat output failed");
+            }
             return;
         }
         #[cfg(feature = "metrics")]

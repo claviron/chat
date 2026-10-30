@@ -7,7 +7,8 @@ a raw QUIC demo/prototype transport.
 The WebTransport adapter consumes `claviron::edge::H3WebTransportBiStream`.
 Claviron's connection driver classifies incoming streams before `accept_bi()`
 delivers them to their session; Chat does not resolve HTTP requests or streams
-belonging to other sessions.
+belonging to other sessions. Chat has no direct H3 family dependencies; the
+separate raw QUIC prototype depends on Quinn.
 
 Each accepted WebTransport bidirectional stream is a separate logical Chat
 connection: it has its own UUID, welcome, room membership, bounded queues and
@@ -22,14 +23,21 @@ stream admits one queued input message and one pending decoded message while
 its handler runs. Further input waits for capacity. Frames retain the existing
 length-prefixed MessagePack format and byte-size limit.
 
-Listener drain, host retirement, server shutdown or CONNECT termination stops
-new stream and input admission. Every owned stream is signalled and joined.
+Listener drain, host retirement or server shutdown stops new stream and input
+admission. Every owned stream is signalled and joined.
 Output closes its queue to new sends, releasing blocked producers, and finishes
 the in-flight frame and already queued frames before shutting down its write
 half. Admitted application work is awaited, not cancelled; replies not yet
 admitted to output can fail during drain. No detached transport tasks, polling
 or adapter-owned timeout is introduced; native grace enforcement remains with
 the listener.
+
+Native WebTransport session termination also stops admission and joins owned
+work, but its data streams are already reset: queued replies cannot be promised
+to reach the peer. Frame IO retains typed transport errors. Claviron's
+`webtransport_session_ended` recognizes `WT_SESSION_GONE` for DEBUG logging;
+other input failures retain WARN and output failures retain ERROR. Invalid
+frames and serialization errors are not classified as session termination.
 
 The crate is intentionally not on the critical serving path. Chat is a
 separate feature surface and may be disabled or misconfigured while the

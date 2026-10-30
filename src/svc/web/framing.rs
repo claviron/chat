@@ -9,6 +9,15 @@ use crate::types::messages::{ClientMessage, ServerMessage};
 
 pub(crate) const FRAME_PREFIX_LEN: usize = 4;
 
+#[cfg(feature = "webtransport")]
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum FrameError {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error("{0}")]
+    Invalid(String),
+}
+
 pub(crate) fn decode_client_message(
     payload: &[u8]
 ) -> Result<ClientMessage, String> {
@@ -37,7 +46,7 @@ pub(crate) async fn read_client_message<R>(
     reader: &mut R,
     inbound: &mut BytesMut,
     max_frame: usize,
-) -> Result<Option<ClientMessage>, String>
+) -> Result<Option<ClientMessage>, FrameError>
 where
     R: AsyncRead + Unpin,
 {
@@ -49,17 +58,20 @@ where
                     .expect("slice length checked"),
             ) as usize;
             if len > max_frame {
-                return Err(format!("frame too large: {len} > {max_frame}"));
+                return Err(FrameError::Invalid(format!(
+                    "frame too large: {len} > {max_frame}"
+                )));
             }
             if inbound.len() >= FRAME_PREFIX_LEN + len {
                 inbound.advance(FRAME_PREFIX_LEN);
                 let payload = inbound.split_to(len);
-                return decode_client_message(&payload).map(Some);
+                return decode_client_message(&payload)
+                    .map(Some)
+                    .map_err(FrameError::Invalid);
             }
         }
 
-        let read =
-            reader.read_buf(inbound).await.map_err(|err| err.to_string())?;
+        let read = reader.read_buf(inbound).await?;
         if read == 0 {
             return Ok(None);
         }
@@ -71,11 +83,13 @@ pub(crate) async fn write_server_message<W>(
     writer: &mut W,
     msg: ServerMessage,
     max_frame: usize,
-) -> Result<(), String>
+) -> Result<(), FrameError>
 where
     W: AsyncWrite + Unpin,
 {
-    let bytes = encode_server_message(&msg, max_frame)?;
-    writer.write_all(&bytes).await.map_err(|err| err.to_string())?;
-    writer.flush().await.map_err(|err| err.to_string())
+    let bytes = encode_server_message(&msg, max_frame)
+        .map_err(FrameError::Invalid)?;
+    writer.write_all(&bytes).await?;
+    writer.flush().await?;
+    Ok(())
 }
