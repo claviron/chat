@@ -95,7 +95,7 @@ impl H1UpgradeHandler for ChatWsUpgradeHandler {
 
     fn is_upgrade(
         &self,
-        req: &Request<axum::body::Body>,
+        req: &Request<claviron::http::RouteBody>,
     ) -> bool {
         is_h1_header_upgrade(req, "websocket")
     }

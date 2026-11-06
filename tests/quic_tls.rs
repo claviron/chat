@@ -3,6 +3,7 @@ use claviron::tls::auth::{ClientAuthMode, ClientAuthPolicy};
 
 fn required() -> ClientAuthPolicy {
     ClientAuthPolicy {
+        authority: None,
         mode: ClientAuthMode::Required,
         ca_bundle: Some("/example/client-ca.pem".into()),
         organization: Some("Example".into()),

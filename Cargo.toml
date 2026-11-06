@@ -1,6 +1,6 @@
 [package]
 name = "claviron-chat"
-version = "0.2.0-alpha.16"
+version = "0.2.0-alpha.17"
 edition = "2024"
 authors = ["ilker Arabaci <iadev09@claviron.dev>"]
 license = "MIT OR Apache-2.0"
@@ -36,7 +36,7 @@ metrics = []
 
 [dependencies]
 # ── Claviron integration ─────────────────────────────────────────────
-claviron = { version = "0.2.0-alpha.23", default-features = false, features = [
+claviron = { version = "0.2.0-alpha.25", default-features = false, features = [
     "auth",
     "server",
     "edge",

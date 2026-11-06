@@ -55,14 +55,16 @@ fn chat_waits_for_identity_and_admission_preparation() {
     registry.register(Arc::new(IdentityPreparation)).unwrap();
     registry.register(Arc::new(DirectoryPreparation)).unwrap();
     let names = registry.lifecycle_names().unwrap();
-    let chat = names.iter().position(|name| *name == "ChatServer").unwrap();
+    let chat =
+        names.iter().position(|name| name.as_ref() == "ChatServer").unwrap();
     for preparation in [
         "test identity preparation",
         "test admission preparation",
         "test directory preparation",
     ] {
         assert!(
-            names.iter().position(|name| *name == preparation).unwrap() < chat
+            names.iter().position(|name| name.as_ref() == preparation).unwrap()
+                < chat
         );
     }
 }
