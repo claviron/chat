@@ -3,28 +3,26 @@ use std::sync::{Arc, OnceLock};
 use async_trait::async_trait;
 #[cfg(feature = "webtransport")]
 use claviron::edge::WebTransportRegistry;
-use claviron::edge::{
-    H1UpgradeRoute, H2ConnectRegistry, Host, HostConfig, Routable,
-};
+use claviron::edge::{Host, HostConfig, Routable};
+use claviron::pipeline::HostHandler;
 use claviron::runtime::registry::{
     Bootable, Component, Error as RegistryError,
 };
 use claviron::runtime::{AppState, Register};
+#[cfg(feature = "webtransport")]
 use tracing::warn;
 
 use crate::config::ChatConfigProvider;
-use crate::svc::web::h2::ChatH2ConnectHandler;
-use crate::svc::web::upgrade::ChatWsUpgradeHandler;
+use crate::svc::web::upgrade::ChatSockets;
 #[cfg(feature = "webtransport")]
 use crate::svc::web::web_transport::ChatWebTransportHandler;
 
 /// Web (HTTP/1.1 + HTTP/2) chat service.
 ///
-/// Registered with its `ChatConfigProvider` in hand; `boot` contributes the
-/// H2 CONNECT and WebTransport handlers to the edge registries for the vhost keys
-/// the applied configuration names, before the host routers are compiled.
-/// WebSocket traffic is contributed as a host-scoped H1 upgrade binding, so
-/// the normal vhost router owns the HTTP/1 upgrade boundary.
+/// Registered with its `ChatConfigProvider` in hand. A WebSocket is a host's
+/// application contribution, on either HTTP version; `boot` contributes the
+/// WebTransport handler for the vhost keys the applied configuration names,
+/// before the host routers are compiled.
 pub struct ChatWebService {
     config_provider: OnceLock<Arc<ChatConfigProvider>>,
 }
@@ -64,13 +62,9 @@ impl Register<AppState> for ChatWebService {
 #[async_trait]
 impl Component<AppState> for ChatWebService {
     #[cfg(not(feature = "webtransport"))]
-    type Deps = (Arc<ChatConfigProvider>, Option<Arc<H2ConnectRegistry>>);
+    type Deps = (Arc<ChatConfigProvider>,);
     #[cfg(feature = "webtransport")]
-    type Deps = (
-        Arc<ChatConfigProvider>,
-        Option<Arc<H2ConnectRegistry>>,
-        Option<Arc<WebTransportRegistry>>,
-    );
+    type Deps = (Arc<ChatConfigProvider>, Option<Arc<WebTransportRegistry>>);
 
     fn name(&self) -> &'static str {
         "ChatWebService"
@@ -98,21 +92,24 @@ impl Routable for ChatWebService {
         cfg.embed.as_ref().is_some_and(|embed| embed.vhosts.contains(key))
     }
 
-    fn h1_upgrades(
-        &self,
-        _key: &Host,
-        _host: Arc<HostConfig>,
-    ) -> claviron::runtime::registry::Result<Vec<H1UpgradeRoute>> {
-        let cfg_provider = self.config_provider()?.clone();
-        let cfg = cfg_provider.current();
+    fn application(
+        self: Arc<Self>,
+        state: &AppState,
+        key: &Host,
+        host: Arc<HostConfig>,
+    ) -> claviron::runtime::registry::Result<Option<Arc<dyn HostHandler>>> {
+        let config_provider = self.config_provider()?.clone();
+        let cfg = config_provider.current();
         let Some(embed) = &cfg.embed else {
-            return Ok(Vec::new());
+            return Ok(None);
         };
-        let path = embed.websocket_route_path();
-        Ok(vec![H1UpgradeRoute::handler(
-            path,
-            Arc::new(ChatWsUpgradeHandler::new(cfg_provider)),
-        )?])
+        Ok(Some(Arc::new(ChatSockets {
+            state: state.clone(),
+            path: embed.websocket_route_path(),
+            config_provider: Arc::clone(&config_provider),
+            host: key.clone(),
+            h1_upgrade: host.transport.h1.upgrade,
+        })))
     }
 }
 
@@ -128,33 +125,15 @@ impl Bootable<AppState, <Self as Component<AppState>>::Deps>
         _state: &AppState,
     ) -> claviron::runtime::registry::Result<()> {
         #[cfg(not(feature = "webtransport"))]
-        let (cfg_provider, h2) = deps;
+        let _ = deps;
         #[cfg(feature = "webtransport")]
-        let (cfg_provider, h2, webtransport) = deps;
+        let (cfg_provider, webtransport) = deps;
+        #[cfg(feature = "webtransport")]
         let cfg = cfg_provider.current();
+        #[cfg(feature = "webtransport")]
         let Some(embed) = &cfg.embed else {
             return Ok(());
         };
-        if let Some(registry) = h2 {
-            let path = embed.h2_connect_route_path();
-            for host in &embed.vhosts {
-                registry.register_handler_for_host(
-                    &host.to_string(),
-                    embed.websocket_route_path(),
-                    Arc::new(ChatWsUpgradeHandler::new(cfg_provider.clone())),
-                )?;
-                if let Err(err) = registry.register_handler_for_host(
-                    &host.to_string(),
-                    path.clone(),
-                    Arc::new(ChatH2ConnectHandler::new(cfg_provider.clone())),
-                ) {
-                    warn!(
-                        "failed to register chat H2 CONNECT binding for vhost {} at {}: {}",
-                        host, path, err
-                    );
-                }
-            }
-        }
         #[cfg(feature = "webtransport")]
         if let Some(registry) = webtransport {
             let path = embed.web_transport_route_path();

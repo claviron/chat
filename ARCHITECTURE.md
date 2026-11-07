@@ -195,19 +195,17 @@ publishes an `ArcSwap` snapshot, and hot-reloads the same snapshot for
 all chat runtimes. Chat providers do not read config files directly.
 
 `ChatWebService` is a provider-only bridge into vhost-level transport
-registries. It registers the configured WebSocket route
-`<chat.path><chat.websocket_path>`, HTTP/2 CONNECT route
-`<chat.path><chat.h2_connect_path>`, and, with the `webtransport`
+registries. It contributes the configured WebSocket route
+`<chat.path><chat.websocket_path>` and, with the `webtransport`
 feature, HTTP/3 WebTransport route
 `<chat.path><chat.web_transport_path>` for each configured chat host key
 during boot; it does not bind a separate socket. Defaults come from
 serde default functions in `config.rs`
-(`/chat/ws`, `/chat/h2`, and `/chat/wt` by default).
+(`/chat/ws` and `/chat/wt` by default).
 
-The WebSocket path is also registered for RFC 8441 extended CONNECT. It shares
-authentication and the MessagePack WebSocket session loop with H1; its 200
-response does not carry H1 key/accept/upgrade headers. The configured H2 path
-remains the separate native length-prefixed MessagePack stream protocol.
+The WebSocket path answers the offer a door puts in the request, on HTTP/1.1
+and on RFC 8441 extended CONNECT alike: one authentication and one MessagePack
+session loop, and the door owns the handshake.
 H2 WebSocket work is submitted through the listener's existing SessionSpawner;
 H1 and H2 WebSockets observe its graceful signal and retire only their own
 connection. No detached WebSocket task or additional timeout is introduced.
@@ -333,13 +331,13 @@ session is checked again after hydration and by the existing delivery checks.
 The browser client selects `auth: "session"` with an explicit same-origin
 `websocketUrl`; it opens a plain WebSocket using the browser's existing cookie,
 without requesting a ticket or proposing a credential subprotocol. The existing
-ticket and Orbit client modes remain available. Native H2 CONNECT and
-WebTransport also require the credential in their handshake in session mode;
+ticket and Orbit client modes remain available. Native
+WebTransport also requires the credential in their handshake in session mode;
 no new first-message authentication protocol is introduced. A browser transport
 that omits cookies cannot authenticate with this mode.
 
 - WebSocket uses `bearer.<base64url-unpadded-token>`; `ticket.` selects tickets.
-- H2 CONNECT and WebTransport use `Authorization: Bearer <token>`.
+- WebTransport uses `Authorization: Bearer <token>`.
 - `Authorization: Ticket <ticket>` explicitly selects tickets. Bearer/raw
   credentials use `chat.auth.default`. The legacy `guard` key aliases `default`.
 - `auth.orbit.audience` defaults to `urn:chat:svc`. The host's bound authenticator
@@ -416,7 +414,7 @@ Chat has no selected-worker run gate anymore:
 - eligible workers follow the listener's own dispatch selection and own only
   their accepted local clients.
 
-Vhost WebSocket, H2 CONNECT, WebTransport, and raw QUIC all follow the
+Vhost WebSocket, WebTransport, and raw QUIC all follow the
 same ownership rule: accepted requests/connections may land on any
 worker. `ChatServer` boots when chat is enabled so handlers have local
 connection registries and DB-backed runtime state available where the
@@ -592,13 +590,13 @@ keys skip the binding with a warning.
 
 ## Transport Boundary
 
-Vhost WebSocket, H2 CONNECT, and WebTransport chat do not own TLS. The
+Vhost WebSocket and WebTransport chat do not own TLS. The
 site/vhost listener terminates TLS, applies host policy, and dispatches
 the long-lived session to the registered chat handler.
 
-WebSocket remains the browser-friendly H1 upgrade path. H2 CONNECT is
-the primary native/TUI/GUI path and uses the same authenticated chat
-session and Orbit-backed fanout once connected. WebTransport is the
+WebSocket is the path for browsers and native clients alike, on either HTTP
+version, with the same authenticated chat session and Orbit-backed fanout once
+connected. WebTransport is the
 browser HTTP/3 path when the host listener supports it. H2/H3
 connection-level keepalive and timeout policy belongs to the web
 service that owns the connection, not to chat protocol messages. All
@@ -627,7 +625,7 @@ provider at registration and read its snapshot, never the file.
 allocation or an explicit quota-only SHM open) and takes the identity, auth and
 database handles; it does not connect to a database or bind listeners.
 `ChatWebService::boot` contributes the
-H2 CONNECT and WebTransport handlers to the edge registries for the configured
+WebTransport handler to the edge registry for the configured
 hosts, before host routers are compiled. The owned work — the delivery and
 presence listeners, the presence refresh, the QUIC listener — lives in
 `Runnable::run`, and `Scoped` places it in workers (or a standalone process);

@@ -1,6 +1,5 @@
 pub(crate) mod auth;
 mod framing;
-mod h2;
 mod provider;
 mod session;
 mod upgrade;

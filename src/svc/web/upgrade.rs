@@ -1,258 +1,185 @@
+//! The chat's WebSocket, on HTTP/1.1 and HTTP/2 alike: the offer says what is
+//! being opened and carries it.
+
 use std::sync::Arc;
 
-use async_trait::async_trait;
-use claviron::edge::{
-    H1UpgradeAccept, H1UpgradeAuthenticated, H1UpgradeContext,
-    H1UpgradeHandler, H1UpgradeReject, H1UpgradeResult, is_h1_header_upgrade,
-    websocket_response_headers,
-};
+use claviron::http::session::SessionSpawner;
+use claviron::http::socket::{Carrier, Offer, SocketIo, SocketKind};
+use claviron::http::{RouteResponse, ServiceResult, err_status};
+use claviron::pipeline::{HostHandler, HostHandlerFuture, HostRequest};
 use claviron::runtime::AppState;
-use claviron::runtime::registry::Result as RegistryResult;
-use http::Request;
-use session::handle_websocket;
-use tracing::warn;
+use http::StatusCode;
+use http::request::Parts;
+use tracing::{debug, warn};
 
-use super::session;
+use super::session::handle_websocket;
 use crate::config::{ChatAuthGuard, ChatConfigProvider, ChatEmbedConfig};
 use crate::svc::web::auth::{
     extract_session_user, extract_user_from_protocol, websocket_guard_name,
 };
 use crate::svc::web::validator::OriginValidator;
 
-pub(crate) struct ChatWsUpgradeHandler {
-    config_provider: Arc<ChatConfigProvider>,
+/// One host's chat socket, prepared with the host.
+pub(crate) struct ChatSockets {
+    pub(crate) state: AppState,
+    pub(crate) config_provider: Arc<ChatConfigProvider>,
+    pub(crate) host: claviron::edge::Host,
+    pub(crate) path: Arc<str>,
+    /// The transport's `h1.upgrade`: what the connection's terms allow.
+    pub(crate) h1_upgrade: bool,
 }
 
-impl ChatWsUpgradeHandler {
-    pub(crate) fn new(config_provider: Arc<ChatConfigProvider>) -> Self {
-        Self { config_provider }
-    }
-
-    fn origin_validator(
-        embed: &ChatEmbedConfig
-    ) -> Option<Arc<OriginValidator>> {
-        if embed.allowed_origins.is_empty() {
-            return None;
-        }
-        Some(Arc::new(OriginValidator::new(&embed.allowed_origins)))
-    }
-
-    async fn authenticate(
+impl HostHandler for ChatSockets {
+    fn call(
         &self,
-        state: &AppState,
-        host: &claviron::edge::Host,
-        headers: &http::HeaderMap,
-    ) -> Result<
-        (crate::types::client::ChatAuthentication, Option<String>),
-        H1UpgradeReject,
-    > {
-        let cfg = self.config_provider.current();
-        let embed = cfg.embed.as_ref().ok_or_else(|| {
-            H1UpgradeReject::service_unavailable("chat embed is not configured")
-        })?;
-        if embed.auth.guard_enabled(ChatAuthGuard::Session) {
-            let user = extract_session_user(
-                state,
-                host.to_cow_str().as_ref(),
-                headers,
-                embed,
+        request: HostRequest,
+    ) -> HostHandlerFuture {
+        let head = request.head();
+        let offer = head
+            .extensions
+            .get::<Offer>()
+            .filter(|offer| offer.info().kind == SocketKind::WebSocket)
+            .filter(|_| head.uri.path() == &*self.path)
+            .cloned();
+        let Some(offer) = offer else {
+            return Box::pin(async move { ServiceResult::Unhandled(request) });
+        };
+        if offer.info().carrier == Carrier::H1 && !self.h1_upgrade {
+            return Box::pin(async {
+                ServiceResult::Handled(err_status(StatusCode::FORBIDDEN))
+            });
+        }
+        let (state, config_provider, host) = (
+            self.state.clone(),
+            Arc::clone(&self.config_provider),
+            self.host.clone(),
+        );
+        Box::pin(async move {
+            let (head, _) = request.into_request().into_parts();
+            ServiceResult::Handled(
+                open(state, config_provider, host, offer, head).await,
             )
-            .await
-            .map_err(|status| match status {
-                http::StatusCode::FORBIDDEN => {
-                    H1UpgradeReject::forbidden("chat origin rejected")
-                }
-                http::StatusCode::UNAUTHORIZED => {
-                    H1UpgradeReject::unauthorized("chat session required")
-                }
-                _ => H1UpgradeReject::service_unavailable(
-                    "chat session verification unavailable",
-                ),
-            })?;
-            return Ok((user, None));
-        }
-        validate_origin(headers, Self::origin_validator(embed).as_deref())?;
-        let protocol = extract_protocol_from_headers(headers)?;
-        let requested_guard = websocket_guard_name(&protocol);
-        extract_user_from_protocol(protocol, state, &embed.auth)
-            .await
-            .map(|(user, protocol)| (user, Some(protocol)))
-            .map_err(|err| {
-                warn!(requested_guard,
-                    enabled_guards = ?embed.auth.enabled_guards(),
-                    default_guard = ?embed.auth.default_guard,
-                    reason = %err, "WebSocket authentication rejected");
-                H1UpgradeReject::unauthorized("chat credential rejected")
-            })
-    }
-}
-
-#[async_trait]
-impl H1UpgradeHandler for ChatWsUpgradeHandler {
-    fn name(&self) -> &'static str {
-        "chat_ws_upgrade"
-    }
-
-    fn is_upgrade(
-        &self,
-        req: &Request<claviron::http::RouteBody>,
-    ) -> bool {
-        is_h1_header_upgrade(req, "websocket")
-    }
-
-    async fn accept(
-        &self,
-        state: &AppState,
-        ctx: &H1UpgradeContext,
-    ) -> H1UpgradeResult {
-        let (user, ws_protocol) =
-            self.authenticate(state, &ctx.host, &ctx.headers).await?;
-        let headers =
-            websocket_response_headers(ctx, ws_protocol.as_deref())
-                .map_err(|err| H1UpgradeReject::bad_request(err.to_string()))?;
-        Ok(H1UpgradeAccept::authenticated(headers, user))
-    }
-
-    async fn handle_upgraded(
-        &self,
-        state: AppState,
-        ctx: H1UpgradeContext,
-        authenticated: Option<H1UpgradeAuthenticated>,
-        upgraded: hyper::upgrade::Upgraded,
-    ) -> RegistryResult<()> {
-        let sessions = ctx.sessions.clone();
-        drop(ctx); // Do not retain credential headers for the connection lifetime.
-        let user = authenticated
-            .ok_or_else(|| {
-                claviron::runtime::registry::Error::msg(
-                    "chat websocket auth missing",
-                )
-            })?
-            .take::<crate::types::client::ChatAuthentication>()?;
-        handle_websocket(
-            upgraded,
-            state,
-            user,
-            sessions.wait_graceful_shutdown(),
-        )
-        .await
-        .map_err(|err| {
-            claviron::runtime::registry::Error::recoverable(err.to_string())
         })
     }
 }
 
-/// RFC 8441 shares the H1 authentication and MessagePack WebSocket loop.
-#[async_trait]
-impl claviron::edge::H2ConnectHandler for ChatWsUpgradeHandler {
-    fn name(&self) -> &'static str {
-        "chat_websocket_h2"
-    }
-
-    async fn accept(
-        &self,
-        state: &AppState,
-        ctx: &claviron::edge::AuthContext,
-    ) -> claviron::edge::H2ConnectResult {
-        if ctx
-            .headers
-            .get(http::header::SEC_WEBSOCKET_VERSION)
-            .and_then(|value| value.to_str().ok())
-            != Some("13")
-        {
-            return Err(claviron::edge::H2ConnectReject::bad_request());
-        }
-        let accepted =
-            self.authenticate(state, &ctx.host, &ctx.headers).await.map_err(
-                |error| claviron::edge::H2ConnectReject::new(error.status()),
-            )?;
-        Ok(claviron::edge::H2ConnectAccept::authenticated(accepted))
-    }
-
-    async fn handle(
-        &self,
-        state: AppState,
-        ctx: claviron::edge::AuthContext,
-        authenticated: Option<claviron::edge::AnyAuthenticated>,
-        request: Request<claviron::http::RouteBody>,
-    ) -> RegistryResult<claviron::http::RouteResponse> {
-        use claviron::http::session::SessionSpawner;
-        use claviron::http::{empty_body, err_status};
-        use http::StatusCode;
-        if !request.extensions().get::<hyper::ext::Protocol>().is_some_and(
-            |protocol| protocol.as_str().eq_ignore_ascii_case("websocket"),
-        ) {
-            return Ok(err_status(StatusCode::BAD_REQUEST));
-        }
-        let (user, protocol) = authenticated
-            .ok_or_else(|| {
-                claviron::registry::Error::msg("chat H2 WebSocket auth missing")
-            })?
-            .take::<(crate::types::client::ChatAuthentication, Option<String>)>(
-            )?;
-        let sessions =
-            request.extensions().get::<SessionSpawner>().cloned().ok_or_else(
-                || {
-                    claviron::registry::Error::msg(
-                        "chat H2 WebSocket session owner missing",
-                    )
-                },
-            )?;
-        drop(ctx);
-        let owner = sessions.clone();
-        let submitted = sessions.spawn(async move {
-            let upgraded = tokio::select! {
-                biased;
-                _ = owner.wait_graceful_shutdown() => return,
-                result = hyper::upgrade::on(request) => match result {
-                    Ok(upgraded) => upgraded,
-                    Err(error) => {
-                        tracing::debug!(%error, "chat H2 WebSocket upgrade failed");
-                        return;
-                    }
-                }
-            };
-            if let Err(error) = handle_websocket(upgraded, state, user, owner.wait_graceful_shutdown()).await {
-                tracing::debug!(%error, "chat H2 WebSocket ended with an error");
+async fn open(
+    state: AppState,
+    config_provider: Arc<ChatConfigProvider>,
+    host: claviron::edge::Host,
+    offer: Offer,
+    head: Parts,
+) -> RouteResponse {
+    let (user, protocol) = match authenticate(
+        &config_provider,
+        &state,
+        &host,
+        &head.headers,
+    )
+    .await
+    {
+        Ok(accepted) => accepted,
+        Err(status) => return err_status(status),
+    };
+    let listener = head.extensions.get::<SessionSpawner>().cloned();
+    // Credential headers go no further than this; the session holds the user.
+    drop(head);
+    let Some(claim) = offer.claim() else {
+        return err_status(StatusCode::BAD_REQUEST);
+    };
+    let mut proposal = claim.accept_with(move |io| async move {
+        let SocketIo::Stream(upgraded) = io else {
+            debug!("the chat has no use for this session's I/O");
+            return;
+        };
+        let shutdown = async move {
+            match listener {
+                Some(listener) => listener.wait_graceful_shutdown().await,
+                None => std::future::pending().await,
             }
-        });
-        if submitted.is_err() {
-            return Ok(err_status(StatusCode::SERVICE_UNAVAILABLE));
+        };
+        if let Err(error) =
+            handle_websocket(upgraded, state, user, shutdown).await
+        {
+            debug!(%error, "chat WebSocket ended with an error");
         }
-        let mut response = http::Response::builder().status(StatusCode::OK);
-        if let Some(protocol) = protocol {
-            response =
-                response.header(http::header::SEC_WEBSOCKET_PROTOCOL, protocol);
-        }
-        response
-            .body(empty_body())
-            .map_err(|error| claviron::registry::Error::msg(error.to_string()))
+    });
+    if let Some(protocol) = protocol
+        && let Ok(value) = http::HeaderValue::from_str(&protocol)
+    {
+        proposal
+            .headers_mut()
+            .insert(http::header::SEC_WEBSOCKET_PROTOCOL, value);
     }
+    proposal
+}
+
+fn origin_validator(embed: &ChatEmbedConfig) -> Option<Arc<OriginValidator>> {
+    if embed.allowed_origins.is_empty() {
+        return None;
+    }
+    Some(Arc::new(OriginValidator::new(&embed.allowed_origins)))
+}
+
+async fn authenticate(
+    config_provider: &ChatConfigProvider,
+    state: &AppState,
+    host: &claviron::edge::Host,
+    headers: &http::HeaderMap,
+) -> Result<
+    (crate::types::client::ChatAuthentication, Option<String>),
+    StatusCode,
+> {
+    let cfg = config_provider.current();
+    let embed = cfg.embed.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    if embed.auth.guard_enabled(ChatAuthGuard::Session) {
+        let user = extract_session_user(
+            state,
+            host.to_cow_str().as_ref(),
+            headers,
+            embed,
+        )
+        .await
+        .map_err(|status| match status {
+            StatusCode::FORBIDDEN | StatusCode::UNAUTHORIZED => status,
+            _ => StatusCode::SERVICE_UNAVAILABLE,
+        })?;
+        return Ok((user, None));
+    }
+    validate_origin(headers, origin_validator(embed).as_deref())?;
+    let protocol = extract_protocol_from_headers(headers)?;
+    let requested_guard = websocket_guard_name(&protocol);
+    extract_user_from_protocol(protocol, state, &embed.auth)
+        .await
+        .map(|(user, protocol)| (user, Some(protocol)))
+        .map_err(|err| {
+            warn!(requested_guard,
+                enabled_guards = ?embed.auth.enabled_guards(),
+                default_guard = ?embed.auth.default_guard,
+                reason = %err, "WebSocket authentication rejected");
+            StatusCode::UNAUTHORIZED
+        })
 }
 
 fn validate_origin(
     headers: &http::HeaderMap,
     origin_validator: Option<&OriginValidator>,
-) -> Result<(), H1UpgradeReject> {
-    let Some(v) = origin_validator else {
+) -> Result<(), StatusCode> {
+    let Some(validator) = origin_validator else {
         return Ok(());
     };
-    let origin = headers.get("origin").and_then(|h| h.to_str().ok());
-    match origin {
-        Some(origin_value) if v.is_allowed(origin_value) => Ok(()),
-        Some(_) => Err(H1UpgradeReject::forbidden("websocket origin rejected")),
-        None => Err(H1UpgradeReject::forbidden("websocket origin missing")),
+    match headers.get("origin").and_then(|origin| origin.to_str().ok()) {
+        Some(origin) if validator.is_allowed(origin) => Ok(()),
+        _ => Err(StatusCode::FORBIDDEN),
     }
 }
 
 fn extract_protocol_from_headers(
     headers: &http::HeaderMap
-) -> Result<String, H1UpgradeReject> {
-    let protocol = headers
+) -> Result<String, StatusCode> {
+    headers
         .get(http::header::SEC_WEBSOCKET_PROTOCOL)
         .and_then(|value| value.to_str().ok())
-        .ok_or_else(|| {
-            H1UpgradeReject::bad_request("missing auth signatures")
-        })?;
-    Ok(protocol.to_string())
+        .map(str::to_owned)
+        .ok_or(StatusCode::BAD_REQUEST)
 }

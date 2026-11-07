@@ -87,8 +87,8 @@ pub(crate) async fn write_server_message<W>(
 where
     W: AsyncWrite + Unpin,
 {
-    let bytes = encode_server_message(&msg, max_frame)
-        .map_err(FrameError::Invalid)?;
+    let bytes =
+        encode_server_message(&msg, max_frame).map_err(FrameError::Invalid)?;
     writer.write_all(&bytes).await?;
     writer.flush().await?;
     Ok(())

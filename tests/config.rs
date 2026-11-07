@@ -76,7 +76,6 @@ fn embed_is_opt_in_without_a_global_enabled_flag_or_flat_web_fields() {
     assert!(config.validate().is_ok());
     let embed = config.embed.as_ref().unwrap();
     assert_eq!(&*embed.websocket_route_path(), "/chat/ws");
-    assert_eq!(&*embed.h2_connect_route_path(), "/chat/h2");
     assert_eq!(&*embed.web_transport_route_path(), "/chat/wt");
     let empty: ChatConfig =
         serde_yaml::from_str("embed: {vhosts: []}").unwrap();
@@ -119,7 +118,7 @@ fn validates_history_windows_and_bounds_every_request() {
 #[test]
 fn joins_chat_transport_paths() {
     assert_eq!(&*join_route_path("/chat", "/ws"), "/chat/ws");
-    assert_eq!(&*join_route_path("/chat/", "h2"), "/chat/h2");
+    assert_eq!(&*join_route_path("/chat/", "wt"), "/chat/wt");
     assert_eq!(&*join_route_path("", "/ws"), "/ws");
     assert_eq!(&*join_route_path("/", ""), "/");
 }

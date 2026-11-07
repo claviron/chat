@@ -17,8 +17,6 @@ pub struct ChatEmbedConfig {
     pub path: String,
     #[serde(default = "super::default_websocket_path")]
     pub websocket_path: String,
-    #[serde(default = "super::default_h2_connect_path")]
-    pub h2_connect_path: String,
     #[serde(default = "super::default_web_transport_path")]
     pub web_transport_path: String,
     #[serde(default)]
@@ -52,10 +50,6 @@ pub struct ChatEmbedConfig {
 impl ChatEmbedConfig {
     pub(crate) fn websocket_route_path(&self) -> Arc<str> {
         join_route_path(&self.path, &self.websocket_path)
-    }
-
-    pub(crate) fn h2_connect_route_path(&self) -> Arc<str> {
-        join_route_path(&self.path, &self.h2_connect_path)
     }
 
     pub(crate) fn web_transport_route_path(&self) -> Arc<str> {

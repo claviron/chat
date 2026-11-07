@@ -315,10 +315,6 @@ fn default_websocket_path() -> String {
     "/ws".to_string()
 }
 
-fn default_h2_connect_path() -> String {
-    "/h2".to_string()
-}
-
 fn default_web_transport_path() -> String {
     "/wt".to_string()
 }
@@ -466,7 +462,7 @@ pub struct OrbitChatAuthConfig {
     #[serde(default = "default_true")]
     pub websocket_subprotocol: bool,
 
-    /// Allow H2 CONNECT / WebTransport auth through `Authorization:
+    /// Allow WebTransport auth through `Authorization:
     /// Bearer <token>`.
     #[serde(default = "default_true")]
     pub bearer_header: bool,
@@ -514,7 +510,7 @@ pub struct TicketChatAuthConfig {
     #[serde(default = "default_true")]
     pub websocket_subprotocol: bool,
 
-    /// Allow H2 CONNECT / WebTransport auth through `Authorization:
+    /// Allow WebTransport auth through `Authorization:
     /// Ticket <ticket>`. `Bearer <ticket>` remains available when ticket
     /// is configured as the default guard for legacy clients.
     #[serde(default = "default_true")]

@@ -102,13 +102,11 @@ Default paths are configured from `chat.yaml`:
 
 | Transport | Default path | Best for | Wire payload |
 |---|---:|---|---|
-| WebSocket | `/chat/ws` | Browsers today | MessagePack binary frame |
-| H2 CONNECT | `/chat/h2` | TUI, GUI, native clients | `u32be` length + MessagePack |
+| WebSocket | `/chat/ws` | Browsers and native clients, on HTTP/1.1 or HTTP/2 | MessagePack binary frame |
 | WebTransport | `/chat/wt` | Browser HTTP/3 path where available | `u32be` length + MessagePack on one bidi stream |
 | Raw QUIC | configured `quic` listener | Demo/prototype transport | Legacy framed envelope |
 
-Use WebSocket for browser clients now. Use H2 CONNECT for native clients that do
-not need browser APIs. WebTransport is the HTTP/3 browser path, but the current
+Use WebSocket for browser and native clients. WebTransport is the HTTP/3 browser path, but the current
 handler expects bearer authentication in headers; browsers that cannot set an
 `Authorization` header for WebTransport need an auth-binding adapter before WT
 is the primary browser transport.
@@ -117,7 +115,7 @@ is the primary browser transport.
 
 Auth is selected from the embedded binding's `auth.guards` in `chat.yaml`. WebSocket clients
 select an enabled guard with their `bearer.` or `ticket.` subprotocol prefix.
-For H2 CONNECT and WebTransport, `Ticket` selects ticket auth explicitly;
+For WebTransport, `Ticket` selects ticket auth explicitly;
 `Bearer` uses `auth.default`. Orbit's audience is configurable through
 `auth.orbit.audience` and defaults to `urn:chat:svc`. JWT mode is not
 supported; use a host-issued Orbit session-bound token instead.
@@ -126,7 +124,7 @@ supported; use a host-issued Orbit session-bound token instead.
 `SessionAuthenticator`, and chat accepts only a valid existing session and an
 explicitly allowed Origin. It never creates a guest session. The browser client
 uses the current origin's cookie without a credential subprotocol or ticket
-request. H2/WebTransport session mode likewise requires session credentials in
+request. WebTransport session mode likewise requires session credentials in
 the handshake; there is no first-message login protocol.
 
 For clients using the optional `ticket` guard, a ticket issuer writes a
@@ -139,7 +137,6 @@ already shaped for clients:
   "ticket": "opaque-secret",
   "expires_in": 60,
   "websocket_url": "wss://chat.example.test/chat/ws",
-  "h2_connect_url": "https://chat.example.test/chat/h2",
   "web_transport_url": "https://chat.example.test/chat/wt",
   "websocket_subprotocol": "ticket.<base64url-unpadded-ticket>",
   "authorization": "Ticket opaque-secret"
@@ -147,7 +144,7 @@ already shaped for clients:
 ```
 
 The client should treat `ticket` as opaque. Browser WebSocket clients use the
-provided `websocket_subprotocol`; H2 CONNECT and WebTransport clients use the
+provided `websocket_subprotocol`; WebTransport clients use the
 provided `authorization` value. The server-side ticket payload is a JSON user
 snapshot (`v`, numeric `id`, `uuid`, `username`, `name`, `avatar_url`) and is
 not rehydrated from the chat database during authentication.
@@ -188,17 +185,6 @@ const ws = new WebSocket(boot.websocket_url, [boot.websocket_subprotocol]);
 ws.binaryType = "arraybuffer";
 ```
 
-### H2 CONNECT
-
-H2 CONNECT uses a normal bearer header:
-
-```text
-Authorization: Bearer <orbit-token>
-Authorization: Ticket <ticket>
-```
-
-The request method is `CONNECT`, the path is the configured H2 endpoint, and the
-request/response bodies form the bidirectional chat stream.
 
 ### WebTransport
 
@@ -232,7 +218,7 @@ Timestamps are Unix timestamps in seconds.
 WebSocket does not add an application length prefix. Each WebSocket binary frame
 contains exactly one MessagePack `ClientMessage` or `ServerMessage`.
 
-H2 CONNECT and WebTransport use the same stream framing:
+WebTransport uses this stream framing:
 
 ```text
 4 bytes: unsigned big-endian payload length
@@ -719,19 +705,6 @@ This minimal encoding example does not own reconnection. Prefer `ChatClient`
 for its configured backoff, single pending retry and explicit-disconnect
 cancellation rather than adding an unowned retry loop to a UI component.
 
-## H2 CONNECT Client Notes
-
-An H2 CONNECT client needs:
-
-- HTTP/2 TLS connection to the vhost.
-- `CONNECT /chat/h2`
-- `Authorization: Bearer <orbit-token>` or `Authorization: Ticket <ticket>`
-- Request body stream for client frames.
-- Response body stream for server frames.
-- `u32be` frame parser/writer around MessagePack payloads.
-
-There is no chat-level ping requirement for H2. Connection keepalive and idle
-policy belong to the HTTP/2 transport layer.
 
 ## WebTransport Client Notes
 
@@ -749,5 +722,5 @@ keepalive owns liveness.
 
 Raw QUIC is kept as a demo/prototype transport, not the main production chat
 topology. It uses a legacy envelope and little-endian length prefix. New client
-implementations should prefer WebSocket, H2 CONNECT, or WebTransport unless they
+implementations should prefer WebSocket or WebTransport unless they
 are explicitly testing the raw QUIC prototype.
