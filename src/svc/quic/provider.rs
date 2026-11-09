@@ -153,7 +153,9 @@ fn validate_bindings(
         .filter(|listener| listener.transport() == ListenerTransport::Quic)
     {
         for address in &listener.listen {
-            if binds_overlap(reserved, *address) {
+            if let Some(address) = address.socket()
+                && binds_overlap(reserved, address)
+            {
                 return Err(RegistryError::msg(format!(
                     "Raw chat QUIC bind {reserved} conflicts with edge QUIC listener '{}' at {address}; reuseport must not mix raw QUIC and HTTP/3",
                     listener.id
