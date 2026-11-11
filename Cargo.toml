@@ -36,7 +36,7 @@ metrics = []
 
 [dependencies]
 # ── Claviron integration ─────────────────────────────────────────────
-claviron = { version = "0.2.0-alpha.26", path = "../../claviron", default-features = false, features = [
+claviron = { version = "0.2.0-alpha.26", default-features = false, features = [
     "auth",
     "server",
     "edge",
