@@ -38,8 +38,8 @@ a user directory and avatar URLs.
 - `metrics`: Chat connection and message counters.
 - `quic`: experimental raw QUIC transport with its own configured listener.
 
-This release targets Claviron `0.2.0-alpha.25`. Add the service with
-`claviron-chat = "0.2.0-alpha.17"`. The browser client in `client/` is built
+This release targets Claviron `0.2.1`. Add the service with
+`claviron-chat = "0.2.1"`. The browser client in `client/` is built
 separately; see the
 [client API](CHAT_CLIENT_API.md) for messages and transport framing and
 [architecture](ARCHITECTURE.md) for configuration and lifecycle details.
